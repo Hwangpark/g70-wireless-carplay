@@ -178,7 +178,6 @@ HMG-API 앱 → Mods → 이 모드의 설정에서 바꿉니다. 바꾼 뒤에�
 | 블루투스는 붙는데 CarPlay가 안 뜸 | 아이폰 Wi-Fi가 꺼져 있거나 개인용 핫스팟이 켜져 있음 |
 | 위쪽이 "Hooks off" 또는 "no hook map" | 설치 3번(훅 맵)을 다시 |
 | 재시작을 연달아 한 뒤 모드가 전부 안 됨 | 부팅 보호가 걸린 것. `G70-hookreset.zip`을 풀어 USB 최상위에 넣고 실행 → 2분 이상 켜 둔 뒤 재시작 |
-| CarPlay 화면만 멈추고 소리는 계속 남 | `G70: CarPlay always dark`를 끄고 확인 (2.6.6 이하 방식에서 발생) |
 | 통화·내비 음성이 안 들림 | `G70: call state on wireless CarPlay (test)`가 꺼져 있는지 확인 |
 
 ## 제거
