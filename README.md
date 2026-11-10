@@ -51,15 +51,11 @@
 ## 설치 전 확인
 
 1. **펌웨어 버전.** 차에서 설정 → 일반 → SW 정보를 엽니다. 버전에 `S5W_M`이 들어 있고, 소프트웨어 버전이 `IKFL.KOR.0000.V039.001.260902`이어야 합니다. 다르면 이 자료를 쓰지 마세요.
-2. **먼저 지울 것.** 아래가 설치돼 있으면 같은 파일을 건드리므로 먼저 제거합니다.
-   - HMG Leafia Plus
-   - NEMESIS의 Wireless Projection, Projection TBT
-   - 다른 무선 프로젝션 패키지
-3. **장소와 시간.** 주차한 상태에서 전원을 켜고 진행합니다. 처음부터 끝까지 30~40분쯤 걸립니다.
+2. **장소와 시간.** 주차한 상태에서 전원을 켜고 진행합니다. 처음부터 끝까지 30~40분쯤 걸립니다.
 
 ## 준비물
 
-- **USB 메모리** (FAT32 또는 exFAT). 단계마다 내용을 바꿔 담으므로 하나면 됩니다.
+- **USB 메모리** . 단계마다 내용을 바꿔 담으므로 하나면 됩니다.
 - **[NEMESIS](https://github.com/xwtk/hmg_nemesis)** 설치 파일 `ota_package.tar`: 헤드유닛에 패키지를 설치하는 도구
 - **[HMG-API](https://github.com/Open-HMG/HMG-API/releases)** 의 `hmgapi-<버전>-nemesis.zip`: 모드 관리자
 - 이 저장소 [release/](release/)의 파일
