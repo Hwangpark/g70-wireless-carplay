@@ -1,0 +1,103 @@
+diff -ru a/src/hmgapi/mods/wireless/dipo/CpTurns.java b/src/hmgapi/mods/wireless/dipo/CpTurns.java
+--- a/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-03 11:47:37.374389052 +0000
++++ b/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-03 13:02:38.570319517 +0000
+@@ -118,7 +118,7 @@
+ 
+     /** G70 debug: log why turn() stopped, once per change */
+     void dbgWhy(String w) {
+-        if (w.equals(dbgWhy)) return;
++        if (!debug || w.equals(dbgWhy)) return;
+         dbgWhy = w;
+         Dipo.log("CarPlay dbg turn: " + w);
+     }
+@@ -147,6 +147,14 @@
+     final java.util.HashSet<Integer> g70Hints = new java.util.HashSet<Integer>();
+     int dbgKw;
+ 
++    /**
++     * G70: the detailed route guidance log (setting g70_debug, off by default): every
++     * route state with its source, the first messages item by item, each maneuver's
++     * type and description words, why a turn wasn't sent. Off, only changes are logged
++     * (the guiding app, an icon the build's table lacks, the destination, the end).
++     */
++    static boolean debug;
++
+     /** G70: what the iAP2 listener passed with the message being handled (arg1, arg2) */
+     int a1, a2;
+     /**
+@@ -190,7 +198,7 @@
+         String who = name != null ? name : lastName;
+         if (name != null) lastName = name;
+         long now = android.os.SystemClock.elapsedRealtime();
+-        if (st >= 0 && dbgStates < 300) {
++        if (debug && st >= 0 && dbgStates < 300) {
+             dbgStates++;
+             Dipo.log("CarPlay dbg state " + st + " from " + (name != null ? name : "(" + who + ")") + " arg " + a1 + "/" + a2);
+         }
+@@ -258,7 +266,7 @@
+     /** RouteGuidanceUpdate (DiPO e/u.c) */
+     void routeGuidance(Iap2NotiMsg msg) {
+         if (msg == null) return;
+-        if (dbgRg < 8) {
++        if (debug && dbgRg < 8) {
+             dbgRg++;
+             dbgDump("RG#" + dbgRg, msg);
+         }
+@@ -306,11 +314,11 @@
+      */
+     void maneuver(Iap2NotiMsg msg) {
+         if (msg == null) return;
+-        if (dbgMan < 12) {
++        if (debug && dbgMan < 12) {
+             dbgMan++;
+             dbgDump("MAN#" + dbgMan, msg);
+         }
+-        if (dbgKw < 400) dbgKeywords(msg);
++        if (debug && dbgKw < 400) dbgKeywords(msg);
+         int index = -1;
+         int[] ids = null;
+         Iap2NotiMsg.Iap2ObjGroup g = msg.getItemGroup();
+@@ -628,8 +636,12 @@
+                 dist = 0f;
+             }
+         }
+-        if (u.state == 6) cluster.destinationName(0, u.destination);
+-        else g70Destination(u);
++        if (u.state == 6) {
++            cluster.destinationName(0, u.destination);
++            sentDest = u.destination;   // G70: sent here already, g70Destination won't repeat it
++        } else {
++            g70Destination(u);
++        }
+         LinkedHashMap<Integer, Maneuver> m = maneuvers.get(id);
+         if (m == null || list == null) {
+             dbgWhy("state " + u.state + ": " + (m == null ? "no maneuvers for component " + id + " (have " + maneuvers.keySet() + ")" : "")
+diff -ru a/src/hmgapi/mods/wireless/dipo/Dipo.java b/src/hmgapi/mods/wireless/dipo/Dipo.java
+--- a/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-03 11:47:37.350056153 +0000
++++ b/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-03 13:01:51.048195553 +0000
+@@ -131,6 +131,7 @@
+         });
+         rg = new RgListener();
+         // G70: tbtInfo as DiPO sends it (default) or as Hyundai's Android Auto manager does
++        CpTurns.debug = mod.settingBoolean("g70_debug", false);
+         turns.gpmStyle = "gpm".equals(mod.settingString("g70_tbt_style", "dipo"));
+         if (turns.gpmStyle) log("CarPlay: G70 turn style gpm (side street 65535, direction, bar 32)");
+         // G70: HUD icon test (off unless the owner picks codes in the mod's settings)
+@@ -153,7 +154,7 @@
+             @Override
+             protected void beforeHookedMethod(Param p) {
+                 if (OWN.get() != null) return;
+-                if (dbgStops < 20) {
++                if (CpTurns.debug && dbgStops < 20) {
+                     dbgStops++;
+                     log("CarPlay dbg: DiPO stops route guidance (" + dbgStops + ")");
+                 }
+@@ -235,7 +236,7 @@
+         @Override
+         public void notify(final int what, int a1, int a2, final Iap2NotiMsg msg) {
+             synchronized (SEEN) {
+-                if (SEEN.add(what)) log("CarPlay dbg: route guidance listener got noti " + what + " (msg " + (msg != null) + ")");
++                if (SEEN.add(what) && CpTurns.debug) log("CarPlay dbg: route guidance listener got noti " + what + " (msg " + (msg != null) + ")");
+             }
+             if ((what != RG_UPDATE && what != RG_MANEUVER && what != RG_LANES) || msg == null) return;
+             post(new Runnable() {

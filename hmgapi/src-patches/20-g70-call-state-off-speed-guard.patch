@@ -1,0 +1,76 @@
+diff -ruN a/src/hmgapi/mods/wireless/dipo/Dipo.java b/src/hmgapi/mods/wireless/dipo/Dipo.java
+--- a/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-07 06:46:12.815673793 +0000
++++ b/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-07 06:46:31.325487949 +0000
+@@ -97,6 +97,7 @@
+         // none of it may stop CarPlay's own parts below
+         try {
+             G70Extra.media = m.settingBoolean("g70_media_info", true);
++            G70Extra.calls = m.settingBoolean("g70_call_state", false);   // G70 2.6.4 (src-patches/20)
+             G70Extra.agreeWatch(a.context, m.settingBoolean("g70_agree_notice", false));
+             // G70 2.6.0 (src-patches/16): engine temperatures on the CarPlay screen in sport mode, driving data (research)
+             G70Gauge.init(a.context, m.settingBoolean("g70_sport_temps", true), m.settingString("g70_sport_temps_pos", "topleft"));
+diff -ruN a/src/hmgapi/mods/wireless/dipo/G70Extra.java b/src/hmgapi/mods/wireless/dipo/G70Extra.java
+--- a/src/hmgapi/mods/wireless/dipo/G70Extra.java	2026-11-07 06:46:12.816460862 +0000
++++ b/src/hmgapi/mods/wireless/dipo/G70Extra.java	2026-11-07 06:46:31.307299490 +0000
+@@ -15,6 +15,12 @@
+  * calls go out once the wireless CarPlay channel's iAP2 session (component 5) is up, as
+  * DiPO makes them for USB. The K8 HEV package does the same ("곡 정보 구독").
+  *
++ * 2.6.4 (src-patches/20): the two call-state requests only with setting g70_call_state (off
++ * by default). With them DiPO runs its call path on wireless (11/07: a KakaoTalk voice call's
++ * states went through DiPO's call notification to the car's mode manager), which DiPO's own
++ * wireless code leaves out; they showed nothing on the cluster, and the owner's voice calls
++ * dropped. Now playing (the HUD's song) stays with g70_media_info.
++ *
+  * The startup agreement (setting g70_agree_notice, off by default): the consent screen the
+  * car shows at every start until the driver confirms. 2.6.2: it is the system's
+  * LockScreenService screen (sys.boot.show_screen / sys.boot.confirm_screen); dismissed with
+@@ -28,6 +34,8 @@
+     private G70Extra() {}
+ 
+     static boolean media;
++    /** 2.6.4: the call-state requests too (setting g70_call_state, off) */
++    static boolean calls;
+     /** host tests: run at once instead of on a thread after a delay */
+     static boolean now;
+     static int mediaStarts;
+@@ -90,9 +98,13 @@
+             }
+         }
+         StringBuilder s = new StringBuilder(np);
+-        for (int i = 1; i < MEDIA_CALLS.length; i++) s.append(", ").append(call(iap2, MEDIA_CALLS[i]));
++        if (calls) {
++            for (int i = 1; i < MEDIA_CALLS.length; i++) s.append(", ").append(call(iap2, MEDIA_CALLS[i]));
++        } else {
++            s.append(", call state not asked (setting g70_call_state off)");
++        }
+         mediaStarts++;
+-        Dipo.log("G70: song and call info asked for on wireless CarPlay (" + mediaStarts + ", try " + tries + "): " + s);
++        Dipo.log("G70: song" + (calls ? " and call" : "") + " info asked for on wireless CarPlay (" + mediaStarts + ", try " + tries + "): " + s);
+         Research.line("media: " + s);
+     }
+ 
+diff -ruN a/src/hmgapi/mods/wireless/dipo/G70Gauge.java b/src/hmgapi/mods/wireless/dipo/G70Gauge.java
+--- a/src/hmgapi/mods/wireless/dipo/G70Gauge.java	2026-11-07 06:46:12.816604206 +0000
++++ b/src/hmgapi/mods/wireless/dipo/G70Gauge.java	2026-11-07 06:46:31.321433893 +0000
+@@ -170,13 +170,19 @@
+         Object h = G70Drive.hscan();
+         Object v = G70Drive.get(h, "getCarSpeed"), p = G70Drive.get(h, "getAccelPdlVal");
+         pedal = p instanceof Number ? ((Number) p).floatValue() : -1;
+-        if (!(v instanceof Number)) {
++        // 2.6.4: 511 km/h (the signal's "invalid", once at a restart on 11/06 16:08) is no speed
++        if (!(v instanceof Number) || !speedOk(((Number) v).floatValue())) {
+             g = Float.NaN;
+             return;
+         }
+         g = accelG(now, ((Number) v).floatValue());
+     }
+ 
++    /** the car's speed signal says 511 (0x1ff) when it has none */
++    static boolean speedOk(float kmh) {
++        return kmh >= 0 && kmh < 300;
++    }
++
+     /** m/s2 over about a second, in G (speed in whole km/h: steps of about 0.03 G) */
+     static synchronized float accelG(long now, float kmh) {
+         SPEEDS.addLast(new long[] { now, Math.round(kmh * 100) });

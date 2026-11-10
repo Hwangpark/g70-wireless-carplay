@@ -1,0 +1,179 @@
+diff -ruN a/src/hmgapi/mods/wireless/dipo/Dipo.java b/src/hmgapi/mods/wireless/dipo/Dipo.java
+--- a/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-05 01:56:19.391569201 +0000
++++ b/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-05 01:56:37.932393714 +0000
+@@ -102,6 +102,12 @@
+         } catch (Throwable t) {
+             error("G70 extras", t);
+         }
++        // G70 2.5.3 (src-patches/15): mute pauses CarPlay music, as it pauses Bluetooth audio
++        try {
++            G70Mute.start(a.context, a.classLoader, m.settingBoolean("g70_mute_pause", true) && m.settingBoolean("bridge", true));
++        } catch (Throwable t) {
++            error("G70 mute", t);
++        }
+         // the CarPlay libraries, patched in memory once DiPO loads them (files stay stock)
+         if (bridge) m.nativePatch(a, "libCarPlayCore.so");   // AirPlay sessions over Wi-Fi
+         if (m.settingBoolean("audio", true)) {
+diff -ruN a/src/hmgapi/mods/wireless/dipo/G70Mute.java b/src/hmgapi/mods/wireless/dipo/G70Mute.java
+--- a/src/hmgapi/mods/wireless/dipo/G70Mute.java	1970-01-01 00:00:00.000000000 +0000
++++ b/src/hmgapi/mods/wireless/dipo/G70Mute.java	2026-11-05 01:56:37.932151418 +0000
+@@ -0,0 +1,159 @@
++package hmgapi.mods.wireless.dipo;
++
++import android.content.Context;
++
++import com.hkmc.media.MicomAudioManager;
++import com.hkmc.media.MicomAudioStateChangeListener;
++import com.hkmc.media.MicomAudioStatus;
++
++/**
++ * G70 2.5.3 (src-patches/15): mute pauses CarPlay music, as it pauses Bluetooth audio
++ * (setting g70_mute_pause, on by default). The owner: "when I press mute the song
++ * doesn't pause, only the sound goes off".
++ *
++ * On Bluetooth audio the car sends the phone a pause with the mute. With CarPlay the
++ * mute only silences the car (the car's audio manager handles it, not DiPO), so the
++ * song plays on unheard. Here: when the owner's mute comes on while CarPlay music is
++ * the car's audio (MicomAudioManager.getCurrentStreamType() is DIPOMUSIC, 14), the
++ * iPhone gets a Pause press through DiPO's own CarPlay remote call
++ * (CarPlayService.onConsumer, what the steering wheel's media keys use); when the mute
++ * goes off again, a Play press, only if this paused it and CarPlay music is still the
++ * car's audio. The mute state is the car's own (getUserMuteState, which DiPO reads too),
++ * checked at every onMute the audio manager sends, so the volume knob turned up (which
++ * unmutes) counts as well. With the research log on, every mute event and the values
++ * read go to it, also with the setting off.
++ */
++final class G70Mute {
++    private G70Mute() {}
++
++    /** MicomAudioManagerConstant.AudioType.DIPOMUSIC */
++    static final int DIPOMUSIC = 0xe;
++    static final String CONSUMER = "com.daudio.app.dipo.telechips.CarPlayConsumer";
++    static long PRESS_MS = 80;
++
++    static boolean on;
++    static ClassLoader cl;
++    static MicomAudioManager am;
++    static boolean muted, pausedByUs;
++    static int pauses, plays;
++    /** the car's audio stream a second after the pause: once the iPhone stops, it may no longer read DIPOMUSIC */
++    static int streamAfterPause = Integer.MIN_VALUE;
++
++    /** Dipo.start: on (the setting) acts; research alone only records */
++    static void start(Context c, ClassLoader dipo, boolean enable) {
++        on = enable;
++        cl = dipo;
++        if (!on && !Research.on) return;
++        am = new MicomAudioManager(c);
++        muted = userMuted();
++        am.registerListener(new Listener());
++        Research.line("mute: watching the car's mute (" + (on ? "pausing CarPlay music on mute" : "recording only") + "), muted " + muted);
++        if (on) Dipo.log("G70: mute pauses CarPlay music (setting g70_mute_pause)");
++    }
++
++    static final class Listener extends MicomAudioStateChangeListener {
++        @Override
++        public void onStatusChanged(int what, MicomAudioStatus status) {}
++
++        @Override
++        public void onMute(int mode) {
++            try {
++                changed("onMute " + mode);
++            } catch (Throwable t) {
++                Dipo.error("G70 mute", t);
++            }
++        }
++    }
++
++    static boolean userMuted() {
++        try {
++            return am.getUserMuteState();
++        } catch (Throwable t) {
++            return muted;
++        }
++    }
++
++    static int stream() {
++        try {
++            return am.getCurrentStreamType();
++        } catch (Throwable t) {
++            return -1;
++        }
++    }
++
++    /** wireless CarPlay is up and DiPO's CarPlay service is known (the bridge keeps it) */
++    static boolean carPlay() {
++        return Bridge.sCp != null && (Bridge.sCpWireless || Bridge.sCpClient);
++    }
++
++    static synchronized void changed(String why) {
++        boolean now = userMuted();
++        int stream = stream();
++        Research.line("mute: " + why + ", user mute " + now + ", audio stream " + stream + ", CarPlay " + carPlay());
++        if (now == muted) return;
++        muted = now;
++        if (!on) return;
++        if (now) {
++            if (stream == DIPOMUSIC && carPlay()) {
++                pausedByUs = true;
++                press("Pause");
++            }
++        } else if (pausedByUs) {
++            pausedByUs = false;
++            // still CarPlay's: DIPOMUSIC, or what the stream read just after the pause (the
++            // owner didn't switch to the radio meanwhile)
++            if ((stream == DIPOMUSIC || stream == streamAfterPause) && carPlay()) press("Play");
++            else Research.line("mute: off, but CarPlay music isn't the car's audio any more (stream " + stream + "): not resumed");
++        }
++    }
++
++    /** a press and release of a CarPlay media key, on its own thread (the audio manager's callback returns at once) */
++    static void press(final String key) {
++        final Object cp = Bridge.sCp;
++        G70Extra.later(new Runnable() {
++            @Override
++            public void run() {
++                String r = consumer(cp, key, true);
++                if (!G70Extra.now) {
++                    try {
++                        Thread.sleep(PRESS_MS);
++                    } catch (InterruptedException e) {
++                        // release anyway
++                    }
++                }
++                r += ", " + consumer(cp, key, false);
++                if ("Pause".equals(key)) {
++                    pauses++;
++                    if (!G70Extra.now) {
++                        try {
++                            Thread.sleep(1000);
++                        } catch (InterruptedException e) {
++                            // read it now
++                        }
++                    }
++                    streamAfterPause = stream();
++                    r += ", stream after " + streamAfterPause;
++                } else {
++                    plays++;
++                }
++                Dipo.log("G70: mute " + ("Pause".equals(key) ? "on: CarPlay music paused" : "off: CarPlay music resumed") + " (" + r + ")");
++                Research.line("mute: " + key + " sent: " + r);
++            }
++        }, 0, "hmgapi-g70-mute");
++    }
++
++    /** DiPO's CarPlayService.onConsumer(CarPlayConsumer, pressed) */
++    @SuppressWarnings({ "unchecked", "rawtypes" })
++    static String consumer(Object cp, String key, boolean pressed) {
++        try {
++            Class c = Class.forName(CONSUMER, true, cl);
++            Object k = Enum.valueOf(c, key);
++            Object r = cp.getClass().getMethod("onConsumer", c, boolean.class).invoke(cp, k, pressed);
++            return key + (pressed ? " down " : " up ") + r;
++        } catch (java.lang.reflect.InvocationTargetException x) {
++            return key + " failed: " + x.getCause();
++        } catch (Throwable x) {
++            return key + " failed: " + x;
++        }
++    }
++}

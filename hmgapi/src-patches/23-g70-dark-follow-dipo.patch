@@ -1,0 +1,177 @@
+diff -ruN a/src/hmgapi/mods/wireless/dipo/Dipo.java b/src/hmgapi/mods/wireless/dipo/Dipo.java
+--- a/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-07 07:39:16.985847331 +0000
++++ b/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-07 07:39:16.991730627 +0000
+@@ -103,7 +103,7 @@
+             G70Car.start(a.context);
+             G70Drive.start(a.context);
+             // G70 2.6.2 (src-patches/18): CarPlay always dark (the car decides CarPlay's appearance)
+-            G70Dark.start(a.context, m.settingBoolean("g70_carplay_dark", true) && m.settingBoolean("bridge", true));
++            G70Dark.start(a.context, m.settingBoolean("g70_carplay_dark", false) && m.settingBoolean("bridge", true));   // 2.6.7: off by default (src-patches/23)
+         } catch (Throwable t) {
+             error("G70 extras", t);
+         }
+diff -ruN a/src/hmgapi/mods/wireless/dipo/G70Dark.java b/src/hmgapi/mods/wireless/dipo/G70Dark.java
+--- a/src/hmgapi/mods/wireless/dipo/G70Dark.java	2026-11-07 07:39:16.985829133 +0000
++++ b/src/hmgapi/mods/wireless/dipo/G70Dark.java	2026-11-07 07:39:16.989850745 +0000
+@@ -1,38 +1,56 @@
+ package hmgapi.mods.wireless.dipo;
+ 
+ import android.content.Context;
++import android.os.Handler;
++import android.os.Looper;
+ 
+ import com.hkmc.setup.VideoSetupListener;
+ import com.hkmc.setup.VideoSetupManager;
+ 
+ /**
+- * G70 2.6.2 (src-patches/18): CarPlay always dark (setting g70_carplay_dark, on by
+- * default). The owner: "I set always dark: TMAP goes dark but CarPlay's background doesn't".
++ * G70 2.6.2 (src-patches/18): CarPlay always dark (setting g70_carplay_dark). The owner: "I set
++ * always dark: TMAP goes dark but CarPlay's background doesn't".
+  *
+  * The car decides CarPlay's appearance, not the iPhone: DiPO sends the night mode
+- * (CarPlayService.setNightMode) from the car's video setup (VideoSetupListener.onDimChanged:
+- * the brightness mode; on auto, the lights, getIlluminateStatus), so by day CarPlay's own
+- * screens are light whatever the iPhone's maps setting. Here the night mode is sent as on:
+- * when the wireless CarPlay session is up, a moment after each of the car's brightness or
+- * light changes (DiPO answers those first), and once a minute in case anything else turned
+- * it off. Through DiPO's own call; nothing in the car's settings changes.
++ * (CarPlayService.setNightMode) from the car's video setup (service/ak, a VideoSetupListener):
++ * brightness mode 2 (night) night, 1 (day) day, 0 and 3 (auto) night while the car's
++ * illumination status is false (dark outside, a tunnel) and day while it is true. DiPO skips a
++ * value it sent already (DipoService "setNightMode() duplicate SKIP").
++ *
++ * 2.6.7 (src-patches/23): the owner's CarPlay picture froze while the sound went on (11/07
++ * 16:19-16:28 on 2.6.5: the phone's video stopped, about 2 MB a minute on Wi-Fi with route
++ * guidance and music still coming; none in hours of 2.6.1 driving, which had no dark). 2.6.2-2.6.6
++ * called the night mode from its own thread, bypassing DiPO's duplicate check: at every session,
++ * 1.5 s after every brightness or light change (so day then night again within 1.5 s each time
++ * it got bright), and once a minute. Now: only where DiPO has chosen day (the same rule, read
++ * from the car's video setup), once per change, on DiPO's main thread, never on a timer; where
++ * DiPO already asks for night (the night brightness mode, or dark outside) nothing is sent. Off by
++ * default: the car's own night brightness mode makes CarPlay dark with no mod at all.
+  */
+ final class G70Dark {
+     private G70Dark() {}
+ 
+     static volatile boolean on;
+-    static int sends;
++    static int sends, skips;
+     static String lastResult;
+     static boolean wasUp;
+-    static long lastAt;
+-    static long EVERY_MS = 60000, AFTER_CHANGE_MS = 1500, LOOK_MS = 5000;
++    static VideoSetupManager video;
++    static Handler main;
++    static long AFTER_CHANGE_MS = 1500, LOOK_MS = 5000;
+ 
+     static void start(Context c, boolean enable) {
+         on = enable;
+         if (!on) return;
+         try {
+-            new VideoSetupManager(c).addListener(new Listener());
++            main = new Handler(Looper.getMainLooper());
++        } catch (Throwable t) {
++            main = null;
++        }
++        try {
++            video = new VideoSetupManager(c);
++            video.addListener(new Listener());
+         } catch (Throwable t) {
++            video = null;
+             Research.line("dark: no video setup listener: " + t);
+         }
+         G70Extra.later(new Runnable() {
+@@ -49,17 +67,17 @@
+                 }
+             }
+         }, LOOK_MS, "hmgapi-g70-dark");
+-        Dipo.log("G70: CarPlay always dark (setting g70_carplay_dark)");
++        Dipo.log("G70: CarPlay always dark (setting g70_carplay_dark): night mode where the car would pick day");
+     }
+ 
+     static boolean up() {
+         return Bridge.sCp != null && (Bridge.sCpWireless || Bridge.sCpClient);
+     }
+ 
+-    /** every few seconds: a new session gets it at once, then once a minute */
++    /** a new session: once, as it starts (no timer after that) */
+     static void look() {
+         boolean u = up();
+-        if (u && (!wasUp || System.currentTimeMillis() - lastAt >= EVERY_MS)) send(wasUp ? "minute" : "session");
++        if (u && !wasUp) fix("session");
+         wasUp = u;
+     }
+ 
+@@ -70,8 +88,8 @@
+         }
+ 
+         @Override
+-        public void onIlluminateStatusChanged(boolean lights) {
+-            soon("lights " + lights);
++        public void onIlluminateStatusChanged(boolean bright) {
++            soon("illumination " + bright);
+         }
+     }
+ 
+@@ -80,11 +98,48 @@
+         G70Extra.later(new Runnable() {
+             @Override
+             public void run() {
+-                if (up()) send(why);
++                if (up()) fix(why);
+             }
+         }, AFTER_CHANGE_MS, "hmgapi-g70-dark-change");
+     }
+ 
++    /** DiPO's choice (service/ak): night in brightness mode 2, day in 1, in auto (0, 3) night while the illumination status is false; null: unknown */
++    static Boolean dipoNight(int dim, boolean bright) {
++        if (dim == 2) return Boolean.TRUE;
++        if (dim == 1) return Boolean.FALSE;
++        if (dim == 0 || dim == 3) return bright ? Boolean.FALSE : Boolean.TRUE;
++        return null;
++    }
++
++    /** where DiPO has chosen day (or the car can't be read): night mode once, on DiPO's main thread */
++    static void fix(final String why) {
++        String state;
++        Boolean night;
++        try {
++            int dim = video.getDim();
++            boolean bright = video.getIlluminateStatus();
++            night = dipoNight(dim, bright);
++            state = "brightness mode " + dim + ", illumination " + bright;
++        } catch (Throwable t) {
++            night = null;
++            state = "car not read: " + t;
++        }
++        if (Boolean.TRUE.equals(night)) {
++            skips++;
++            Research.line("dark: " + why + ": the car asks for night itself (" + state + "): nothing sent");
++            return;
++        }
++        final String reason = why + "; " + state;
++        Runnable r = new Runnable() {
++            @Override
++            public void run() {
++                if (up()) send(reason);
++            }
++        };
++        if (main == null || G70Extra.now) r.run();
++        else main.post(r);
++    }
++
+     /** DiPO's CarPlayService.setNightMode(true) */
+     static synchronized void send(String why) {
+         Object cp = Bridge.sCp;
+@@ -98,9 +153,8 @@
+             r = "failed: " + x;
+         }
+         sends++;
+-        lastAt = System.currentTimeMillis();
+         if (sends == 1 || !r.equals(lastResult)) Dipo.log("G70: CarPlay night mode on (" + why + "): " + r);
+-        if (!"minute".equals(why)) Research.line("dark: night mode on (" + why + "): " + r);
++        Research.line("dark: night mode on (" + why + "): " + r);
+         lastResult = r;
+     }
+ }

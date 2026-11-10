@@ -1,0 +1,262 @@
+diff -ru a/src/hmgapi/mods/wireless/dipo/CpTurns.java b/src/hmgapi/mods/wireless/dipo/CpTurns.java
+--- a/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-03 10:27:05.452860622 +0000
++++ b/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-03 10:43:25.858211496 +0000
+@@ -91,6 +91,31 @@
+         }
+     }
+ 
++    /** G70 debug: one line per maneuver: index, type, exit angle, distance, description words */
++    void dbgKeywords(Iap2NotiMsg msg) {
++        try {
++            Iap2NotiMsg.Iap2ObjGroup g = msg.getItemGroup();
++            if (g == null) return;
++            int index = -1, type = -1, exit = 0, dist = -1;
++            String desc = null;
++            for (int k = 0; k < g.getItemCnt(); k++) {
++                Iap2NotiMsg.Iap2ObjItem it = g.getObjItem(k);
++                if (it == null || it.getItemObjCount() <= 0) continue;
++                int id = it.getItemId();
++                if (id == 1) { int[] v = it.getItemIntArray(); if (v != null) index = v[0]; }
++                else if (id == 2) { String[] v = it.getItemStringArray(); if (v != null) desc = v[0]; }
++                else if (id == 3) { int[] v = it.getItemIntArray(); if (v != null) type = v[0]; }
++                else if (id == 5) { int[] v = it.getItemIntArray(); if (v != null) dist = v[0]; }
++                else if (id == 11) { int[] v = it.getItemIntArray(); if (v != null) exit = v[0]; }
++            }
++            if (type < 0 && desc == null) return;   // a distance-only update
++            dbgKw++;
++            Dipo.log("CarPlay dbg man " + index + ": type " + type + " exit " + exit + " dist " + dist + " desc " + (desc == null ? "-" : desc.length() + " chars, " + keywords(desc)));
++        } catch (Throwable x) {
++            // debug only
++        }
++    }
++
+     /** G70 debug: log why turn() stopped, once per change */
+     void dbgWhy(String w) {
+         if (w.equals(dbgWhy)) return;
+@@ -116,6 +141,12 @@
+         this.restart = restart;
+     }
+ 
++    /** G70: tbtInfo as Hyundai's Android Auto manager sends it (setting g70_tbt_style "gpm"): side street 65535, direction, bar 32 */
++    boolean gpmStyle;
++    /** G70: maneuvers whose icon came from their description (logged once each), and how many maneuvers were logged */
++    final java.util.HashSet<Integer> g70Hints = new java.util.HashSet<Integer>();
++    int dbgKw;
++
+     /** G70: what the iAP2 listener passed with the message being handled (arg1, arg2) */
+     int a1, a2;
+     /**
+@@ -279,6 +310,7 @@
+             dbgMan++;
+             dbgDump("MAN#" + dbgMan, msg);
+         }
++        if (dbgKw < 400) dbgKeywords(msg);
+         int index = -1;
+         int[] ids = null;
+         Iap2NotiMsg.Iap2ObjGroup g = msg.getItemGroup();
+@@ -604,13 +636,22 @@
+             if (icon != 0 && g70Logged.add(x.type))
+                 Dipo.log("CarPlay: G70 icon " + icon + " for maneuver type " + x.type + " (side " + x.side + " junction " + x.junction + " exit " + x.exit + ")");
+         }
++        if (icon == 65 || icon == 172) {
++            int h = g70Hint(x.description);
++            if (h != 0) {
++                if (g70Hints.add(x.index)) Dipo.log("CarPlay: G70 icon " + h + " for maneuver " + x.index + " (type " + x.type + ") from its description (" + keywords(x.description) + ")");
++                icon = h;
++            }
++        }
+         cluster.crossroadName(x.afterRoad);
+         if (icon == 0) {
+             dbgWhy("no cluster icon for maneuver type " + x.type + " side " + x.side + " junction " + x.junction + " exit " + x.exit);
+             return;
+         }
+-        dbgWhy("sending: icon " + icon + " for type " + x.type + " (exit " + x.exit + ") unit " + unit + " state " + u.state);
+-        cluster.tbtInfo(icon, 0, 0f, dist, 0, 0, unit, 0, 0);
++        dbgWhy("sending: icon " + icon + " for type " + x.type + " (exit " + x.exit + ") unit " + unit + " state " + u.state
++                + " list " + list.length + (gpmStyle ? " gpm" : ""));
++        if (gpmStyle) cluster.tbtInfo(icon, 65535, direction(icon), dist, 0, 0, unit, 32, 0);
++        else cluster.tbtInfo(icon, 0, 0f, dist, 0, 0, unit, 0, 0);
+         sendHud(icon, id, u);
+         sendHudDist(dist, unit);
+         sendTrip(u);
+@@ -693,25 +734,31 @@
+      * G70: an icon for the maneuvers the build's table leaves blank (0), so the cluster
+      * and HUD aren't left showing nothing: Apple Maps starts every route with "start
+      * route" (11), and Korean routes are full of keep left / keep right (13, 14) and
+-     * turns at angles the table doesn't list. Only icons the table itself uses: 65
++     * turns at angles the table doesn't list. Only icons Hyundai's own managers send,
++     * with the meanings their Android Auto one (GPM, ported as AaTurns) gives them: 65
+      * straight, 66-68 slight/normal/sharp right, 69-71 sharp/normal/slight left, 72/73
+-     * U-turn, 81/82 off ramp right/left, 112 destination (3 once arrived), 176 ferry.
++     * U-turn, 172 ramp ahead, 173/174 fork or on ramp right/left, 81/82 off ramp
++     * right/left, 86 off ramp, 112 destination (3 once arrived), 176 ferry.
+      */
+     static int g70Icon(int type, int side, int exit, int state) {
+         switch (type) {
+-            case 0: case 3: case 5: case 9: case 11: case 51:   // no turn, straight, follow road, on ramp, start route, change highway
++            case 0: case 3: case 5: case 11:   // no turn, straight, follow road, start route
+                 return 65;
++            case 9:   // on ramp
++                return exit < -22 ? 174 : exit > 22 ? 173 : 172;
++            case 51:   // change highway
++                return 172;
+             case 1: case 20: case 47: case 49:   // left, left at end, sharp left, slight left
+                 return left(exit, type == 47 ? 69 : type == 49 ? 71 : 70);
+             case 2: case 21: case 48: case 50:   // right, right at end, sharp right, slight right
+                 return right(exit, type == 48 ? 68 : type == 50 ? 66 : 67);
+-            case 13: case 52:   // keep left, change highway left
+-                return 71;
+-            case 14: case 53:   // keep right, change highway right
+-                return 66;
++            case 13: case 52:   // keep left, change highway left: GPM's fork left
++                return 174;
++            case 14: case 53:   // keep right, change highway right: GPM's fork right
++                return 173;
+             case 4: case 18: case 26:   // U-turn, start route with U-turn, U-turn when possible
+                 return side == 1 ? 73 : 72;
+-            case 8: return side == 1 ? 82 : 81;   // off ramp: the side traffic exits on
++            case 8: return exit < -22 ? 82 : exit > 22 ? 81 : 86;   // off ramp (GPM: 81 right, 82 left, 86 either)
+             case 22: return 82;
+             case 23: return 81;
+             case 10: case 12: case 24: case 25: case 27:   // arrive
+@@ -724,6 +771,88 @@
+         }
+     }
+ 
++    /**
++     * G70: TMAP sends a fork or an exit as "straight" with no angles (drive log 11/03:
++     * straight on the HUD at a fork the phone drew as one). Its description says which
++     * way: left or right, and whether it's an exit. Only for a straight or ramp-ahead
++     * icon: 173/174 fork right/left, 81/82 exit right/left; 0 when it doesn't say.
++     */
++    static int g70Hint(String d) {
++        if (d == null || d.length() == 0) return 0;
++        boolean l = d.contains("\uC67C\uCABD") || d.contains("\uC88C\uCE21");   // 왼쪽, 좌측
++        boolean r = d.contains("\uC624\uB978\uCABD") || d.contains("\uC6B0\uCE21");   // 오른쪽, 우측
++        if (l == r) return 0;
++        boolean exit = d.contains("\uCD9C\uAD6C") || d.contains("\uC9C4\uCD9C") || d.contains("\uB098\uAC00");   // 출구, 진출, 나가
++        return exit ? (r ? 81 : 82) : (r ? 173 : 174);
++    }
++
++    /** G70 debug: the words of a maneuver's description that pick icons (never the text itself: road names) */
++    static final String[] KW = { "\uC67C\uCABD", "\uC88C\uCE21", "\uC624\uB978\uCABD", "\uC6B0\uCE21", "\uCD9C\uAD6C",
++            "\uC9C4\uCD9C", "\uB098\uAC00", "\uBC29\uD5A5", "\uC9C4\uC785", "\uD569\uB958", "\uBD84\uAE30", "\uACE0\uAC00",
++            "\uC9C0\uD558", "\uC720\uD134", "\uC9C1\uC9C4", "\uB3C4\uCC29", "\uB7A8\uD504", "\uCC28\uC120",
++            "left", "right", "exit", "keep", "ramp", "merge", "Left", "Right", "Exit", "Keep" };
++
++    static String keywords(String d) {
++        if (d == null || d.length() == 0) return "-";
++        StringBuilder b = new StringBuilder();
++        for (String k : KW) {
++            if (!d.contains(k)) continue;
++            if (b.length() > 0) b.append('+');
++            b.append(k);
++        }
++        return b.length() == 0 ? "none" : b.toString();
++    }
++
++    /** the GPM manager's direction for an icon (degrees, clockwise), sent with the GPM style */
++    static float direction(int icon) {
++        switch (icon) {
++            case 66: case 173: case 81: return 30f;
++            case 67: return 90f;
++            case 68: return 135f;
++            case 69: return 225f;
++            case 70: case 72: case 73: return 270f;
++            case 71: case 174: case 82: return 330f;
++            case 97: return 45f;
++            case 99: return 90f;
++            case 100: return 135f;
++            case 102: return 180f;
++            case 103: return 225f;
++            case 105: return 270f;
++            case 106: return 315f;
++            default: return 0f;
++        }
++    }
++
++    /**
++     * the maneuvers after the current one: the phone's list after its first entry, or,
++     * when the list holds only the current one (TMAP, drive log: no next turn ever),
++     * the next indices it sent
++     */
++    static int[] aheadOf(int[] list, LinkedHashMap<Integer, Maneuver> m) {
++        if (list == null || list.length == 0) return new int[0];
++        if (list.length > 1) {
++            int[] r = new int[list.length - 1];
++            System.arraycopy(list, 1, r, 0, r.length);
++            return r;
++        }
++        if (m == null) return new int[0];
++        int n = 0;
++        int[] r = new int[3];
++        for (int k = 1; k <= 3 && m.containsKey(list[0] + k); k++) r[n++] = list[0] + k;
++        int[] t = new int[n];
++        System.arraycopy(r, 0, t, 0, n);
++        return t;
++    }
++
++    /** the HUD's small next-turn icon (65-73) for a maneuver; 0: none to show */
++    static int nextIcon(Maneuver y, int state) {
++        int a = aheadIcon(y.type, y.side, y.junction, y.exit);
++        if (a != 64) return a;
++        int i = icon(y.type, y.side, y.junction, y.exit, state);
++        if (i == 0) i = g70Icon(y.type, y.side, y.exit, state);
++        return i >= 65 && i <= 73 ? i : 0;
++    }
++
+     /** a left turn by its exit angle (0: unknown, the given icon) */
+     static int left(int exit, int none) {
+         int a = Math.abs(exit);
+@@ -769,9 +898,10 @@
+         if (m != null && list != null && list.length > 0) {
+             Maneuver x = m.get(list[0]);
+             if (x != null && x.afterRoad != null) road = x.afterRoad;
+-            if (list.length > 1) {
+-                Maneuver y = m.get(list[1]);
+-                if (y != null && y.distance > 0) next = aheadIcon(y.type, y.side, y.junction, y.exit);
++            int[] ahead = aheadOf(list, m);
++            if (ahead.length > 0) {
++                Maneuver y = m.get(ahead[0]);
++                if (y != null && y.distance > 0) next = nextIcon(y, u.state);
+             }
+         }
+         if (hudType == type && hudNext == next && hudRoad != null && hudRoad.equals(road)) return;
+@@ -896,10 +1026,12 @@
+ 
+     /** up to 3 upcoming turns after this one (updateTPTurnList), distances in the owner's units */
+     void sendAhead(Integer id, Update u) {
+-        int[] list = u == null ? null : u.list;
+-        if (id == null || list == null || list.length <= 1) return;
++        int[] list0 = u == null ? null : u.list;
++        if (id == null || list0 == null || list0.length == 0) return;
+         LinkedHashMap<Integer, Maneuver> m = maneuvers.get(id);
+         if (m == null) return;
++        int[] ahead = aheadOf(list0, m), list = new int[ahead.length + 1];
++        System.arraycopy(ahead, 0, list, 1, ahead.length);
+         int count = 0;
+         for (int k = 1; k < list.length && count < 3; k++) {
+             Maneuver x = m.get(list[k]);
+@@ -913,7 +1045,8 @@
+             Maneuver x = m.get(list[k]);
+             if (x == null || x.distance <= 0 || n >= count) continue;
+             Cluster.Turn t = new Cluster.Turn();
+-            t.type = aheadIcon(x.type, x.side, x.junction, x.exit);
++            t.type = nextIcon(x, u.state);
++            if (t.type == 0) t.type = 64;
+             t.direction = 0;
+             t.traffic = 0;
+             t.no = n + 1;
+diff -ru a/src/hmgapi/mods/wireless/dipo/Dipo.java b/src/hmgapi/mods/wireless/dipo/Dipo.java
+--- a/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-03 10:27:05.453329558 +0000
++++ b/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-03 10:43:35.375463335 +0000
+@@ -130,6 +130,9 @@
+             }
+         });
+         rg = new RgListener();
++        // G70: tbtInfo as DiPO sends it (default) or as Hyundai's Android Auto manager does
++        turns.gpmStyle = "gpm".equals(mod.settingString("g70_tbt_style", "dipo"));
++        if (turns.gpmStyle) log("CarPlay: G70 turn style gpm (side street 65535, direction, bar 32)");
+         // G70: HUD icon test (off unless the owner picks codes in the mod's settings)
+         turns.testCodes = CpTurns.testCodes(mod.settingString("g70_icon_test", "off"));
+         if (turns.testCodes != null) {

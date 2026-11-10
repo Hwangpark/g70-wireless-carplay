@@ -1,0 +1,218 @@
+diff -ruN a/src/hmgapi/mods/wireless/dipo/Dipo.java b/src/hmgapi/mods/wireless/dipo/Dipo.java
+--- a/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-05 10:28:19.980977447 +0000
++++ b/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-05 10:29:09.269423912 +0000
+@@ -99,7 +99,7 @@
+             G70Extra.media = m.settingBoolean("g70_media_info", true);
+             G70Extra.agreeWatch(a.context, m.settingBoolean("g70_agree_notice", false));
+             // G70 2.6.0 (src-patches/16): engine temperatures on the CarPlay screen in sport mode, driving data (research)
+-            G70Gauge.init(a.context, m.settingBoolean("g70_sport_temps", true), m.settingString("g70_sport_temps_pos", "song"));
++            G70Gauge.init(a.context, m.settingBoolean("g70_sport_temps", true), m.settingString("g70_sport_temps_pos", "topleft"));
+             G70Car.start(a.context);
+             G70Drive.start(a.context);
+             // G70 2.6.2 (src-patches/18): CarPlay always dark (the car decides CarPlay's appearance)
+diff -ruN a/src/hmgapi/mods/wireless/dipo/G70Drive.java b/src/hmgapi/mods/wireless/dipo/G70Drive.java
+--- a/src/hmgapi/mods/wireless/dipo/G70Drive.java	2026-11-05 10:28:19.982843839 +0000
++++ b/src/hmgapi/mods/wireless/dipo/G70Drive.java	2026-11-05 10:28:50.826194297 +0000
+@@ -90,13 +90,26 @@
+ 
+     static String fmt(Object v) {
+         if (v == null) return "-";
++        if (v instanceof int[]) return java.util.Arrays.toString((int[]) v);
++        if (v instanceof long[]) return java.util.Arrays.toString((long[]) v);
+         if (v instanceof Float || v instanceof Double) return String.format(Locale.ROOT, "%.2f", ((Number) v).doubleValue());
+         return String.valueOf(v);
+     }
+ 
++    /** 2.6.3: once a minute, what a later display could show: tyres (TPMS), fuel, the oil warning */
++    static final String[] STATUS = { "getTpmsType", "getTpmsPress", "getTpmsTemp", "getTpmsWP", "getFuelLevel", "getFuelDispLvl",
++        "realTimeFuel", "getAvgFuel", "getEngineOilStatus", "getLowFuelWarn" };
++
++    static void status(Object h) {
++        StringBuilder s = new StringBuilder();
++        for (String n : STATUS) s.append(s.length() == 0 ? "" : ", ").append(n.replaceFirst("^get", "")).append(' ').append(fmt(get(h, n)));
++        Research.line("car status: " + s);
++    }
++
+     static void tick() {
+         ticks++;
+         Object h = hscan();
++        if (ticks % 60 == 1) status(h);
+         Object speed = get(h, "getCarSpeed");
+         String v = "speed " + fmt(speed) + ", long accel " + fmt(get(h, "getLongAccelVal")) + ", pedal " + fmt(get(h, "getAccelPdlVal"))
+                 + ", brake " + fmt(get(h, "getCylPrsrVal")) + ", steer " + fmt(get(h, "getSasAngleVal")) + ", gear " + fmt(get(h, "getGearPosition"));
+diff -ruN a/src/hmgapi/mods/wireless/dipo/G70Gauge.java b/src/hmgapi/mods/wireless/dipo/G70Gauge.java
+--- a/src/hmgapi/mods/wireless/dipo/G70Gauge.java	2026-11-05 10:28:19.982606583 +0000
++++ b/src/hmgapi/mods/wireless/dipo/G70Gauge.java	2026-11-05 10:28:39.369393860 +0000
+@@ -21,9 +21,11 @@
+  * the raw values.
+  *
+  * The display: while the drive mode is sport and DiPO (CarPlay) is the screen in front,
+- * a small dark pill with "오일 80° · 냉각수 92°" over the CarPlay picture (blue while the
++ * a small dark pill with "SPORT · 오일 80° · 냉각수 92°" and (2.6.3) "페달 36% · G +0.21" over
++ * the CarPlay picture (blue while the
+  * oil is below 70 degrees: still warming up, don't push yet), where the
+- * owner picked (setting g70_sport_temps_pos: the song card, top right, bottom right).
++ * owner picked (setting g70_sport_temps_pos; 2.6.3: top left by default, nearer the driver's
++ * eyes; also the song card, top right, bottom right).
+  * It takes no touches (they go to CarPlay under it), and goes when the mode or the
+  * screen changes. DiPO runs as the system user and holds SYSTEM_ALERT_WINDOW, so the
+  * window is a system overlay (G70GaugeUi). Whether it shows above CarPlay's video layer
+@@ -63,8 +65,6 @@
+     static String shown;
+     /** below this the oil is still warming up (degrees): the display turns blue */
+     static int COLD_OIL = 70;
+-    static boolean ticking;
+-    static long TICK_MS = 1000;
+ 
+     /** Dipo.start, before G70Car.start */
+     static void init(Context c, boolean enable, String pos) {
+@@ -75,6 +75,7 @@
+             main = new Handler(Looper.getMainLooper());
+             if (ui == null) ui = (Ui) Class.forName("hmgapi.mods.wireless.dipo.G70GaugeUi").getConstructor(Context.class).newInstance(c);
+             if (front == null) front = (Front) ui;
++            startSampler();
+             Dipo.log("G70: engine temperatures on the CarPlay screen in sport mode (" + position + ")");
+         } catch (Throwable t) {
+             on = false;
+@@ -103,6 +104,7 @@
+         boolean was = sport(mode);
+         mode = m;
+         if (!on) return;
++        if (!sport(m)) synchronized (G70Gauge.class) { SPEEDS.clear(); }
+         if (sport(m) && !was) Research.line("gauge: sport mode, temperatures on the CarPlay screen");
+         if (!sport(m) && was) Research.line("gauge: left sport mode (" + m + ")");
+         post();
+@@ -123,7 +125,70 @@
+     static String text() {
+         String c = coolantRaw < 0 ? "--" : degrees(coolantRaw) + "°";
+         String o = oilRaw < 0 ? "--" : degrees(oilRaw) + "°";
+-        return "오일 " + o + " · 냉각수 " + c;
++        String p = pedal < 0 ? "--" : Math.round(pedal) + "%";
++        String gs = Float.isNaN(g) ? "--" : String.format(java.util.Locale.ROOT, "%+.2f", g);
++        return (mode == SPORT_PLUS ? "SPORT+" : "SPORT") + " · 오일 " + o + " · 냉각수 " + c + "\n페달 " + p + " · G " + gs;
++    }
++
++    // ---- 2.6.3: the accelerator pedal and the longitudinal G (from the speed: the car's own
++    // acceleration value stays at -4.18, 11/05), a sample every 250 ms on a thread of its own
++    // while in sport mode with CarPlay in front; the car's telematics CAN service as G70Drive reads it
++
++    static volatile float pedal = -1, g = Float.NaN;
++    static volatile boolean frontNow, sampling;
++    static long SAMPLE_MS = 250, IDLE_MS = 1000;
++    private static final java.util.ArrayDeque<long[]> SPEEDS = new java.util.ArrayDeque<long[]>();   // {time ms, km/h x 100}
++
++    static void startSampler() {
++        sampling = true;
++        Thread t = new Thread(new Runnable() {
++            @Override
++            public void run() {
++                while (on) {
++                    boolean s = sport(mode);
++                    try {
++                        if (s) {
++                            frontNow = front != null && front.dipo();
++                            if (frontNow) sample(System.currentTimeMillis());
++                        }
++                        post();
++                        Thread.sleep(s ? SAMPLE_MS : IDLE_MS);
++                    } catch (InterruptedException e) {
++                        return;
++                    } catch (Throwable x) {
++                        Dipo.error("G70 sport display", x);
++                    }
++                }
++            }
++        }, "hmgapi-g70-gauge");
++        t.setDaemon(true);
++        t.start();
++    }
++
++    /** one sample: the pedal, and G over the last second of speeds */
++    static void sample(long now) {
++        Object h = G70Drive.hscan();
++        Object v = G70Drive.get(h, "getCarSpeed"), p = G70Drive.get(h, "getAccelPdlVal");
++        pedal = p instanceof Number ? ((Number) p).floatValue() : -1;
++        if (!(v instanceof Number)) {
++            g = Float.NaN;
++            return;
++        }
++        g = accelG(now, ((Number) v).floatValue());
++    }
++
++    /** m/s2 over about a second, in G (speed in whole km/h: steps of about 0.03 G) */
++    static synchronized float accelG(long now, float kmh) {
++        SPEEDS.addLast(new long[] { now, Math.round(kmh * 100) });
++        while (SPEEDS.size() > 1 && now - SPEEDS.peekFirst()[0] > 1500) SPEEDS.removeFirst();
++        long[] old = null;
++        for (long[] x : SPEEDS) {
++            if (now - x[0] >= 900) old = x;
++        }
++        if (old == null) return Float.isNaN(g) ? 0f : g;
++        float dt = (now - old[0]) / 1000f;
++        float dv = (Math.round(kmh * 100) - old[1]) / 100f / 3.6f;
++        return dv / dt / 9.81f;
+     }
+ 
+     static String modeName(int m) {
+@@ -163,7 +228,7 @@
+     /** on the main thread: show, refresh or hide; while in sport mode, look again every second (the screen in front changes) */
+     static void update() {
+         try {
+-            boolean want = on && sport(mode) && front != null && front.dipo();
++            boolean want = on && sport(mode) && (sampling ? frontNow : front != null && front.dipo());
+             if (want) {
+                 String t = text();
+                 boolean cold = cold();
+@@ -176,16 +241,6 @@
+                 ui.hide();
+                 shown = null;
+             }
+-            if (on && sport(mode) && !ticking && main != null) {
+-                ticking = true;
+-                main.postDelayed(new Runnable() {
+-                    @Override
+-                    public void run() {
+-                        ticking = false;
+-                        update();
+-                    }
+-                }, TICK_MS);
+-            }
+         } catch (Throwable t) {
+             Dipo.error("G70 sport temperatures", t);
+         }
+diff -ruN a/src/hmgapi/mods/wireless/dipo/G70GaugeUi.java b/src/hmgapi/mods/wireless/dipo/G70GaugeUi.java
+--- a/src/hmgapi/mods/wireless/dipo/G70GaugeUi.java	2026-11-05 10:28:19.982783566 +0000
++++ b/src/hmgapi/mods/wireless/dipo/G70GaugeUi.java	2026-11-05 10:28:50.825918438 +0000
+@@ -17,7 +17,8 @@
+  * G70 2.6.0 (src-patches/16): G70Gauge's window on the car. A system overlay (DiPO is the
+  * system user and holds SYSTEM_ALERT_WINDOW) that takes no touches and no focus, so
+  * CarPlay under it works as before; a dark pill (blue while the oil warms up) with white
+- * text. Positions, on the G70's 1920x720 screen (scaled for another size): "song", the
++ * text (two lines from 2.6.3). Positions, on the G70's 1920x720 screen (scaled for another
++ * size): "topleft" (2.6.3, the default), the top left of the map right of CarPlay's dock; "song", the
+  * top right of CarPlay's now playing card on the right; "top", the top right corner;
+  * "bottom", the bottom right corner. Main thread only (G70Gauge posts there). Also says
+  * whether DiPO is the activity in front (its own top task).
+@@ -63,7 +64,11 @@
+                         | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                 PixelFormat.TRANSLUCENT);
+         p.x = Math.round(w * 40f / 1920);
+-        if ("bottom".equals(position)) {
++        if ("topleft".equals(position)) {   // 2.6.3: the top left of the map, right of CarPlay's dock (nearer the driver)
++            p.gravity = Gravity.TOP | Gravity.LEFT;
++            p.x = Math.round(w * 228f / 1920);
++            p.y = Math.round(h * 16f / 720);
++        } else if ("bottom".equals(position)) {
+             p.gravity = Gravity.BOTTOM | Gravity.RIGHT;
+             p.y = Math.round(h * 24f / 720);
+         } else if ("top".equals(position)) {
+@@ -82,7 +87,8 @@
+         if (view == null) {
+             view = new TextView(context);
+             view.setTextColor(Color.WHITE);
+-            view.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 17);
++            view.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
++            view.setLineSpacing(0, 1.05f);
+             view.setPadding(dp(14), dp(6), dp(14), dp(6));
+             bg = new GradientDrawable();
+             bg.setCornerRadius(dp(18));

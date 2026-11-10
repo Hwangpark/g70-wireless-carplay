@@ -1,0 +1,273 @@
+diff -ruN a/src/hmgapi/mods/wireless/dipo/CpTurns.java b/src/hmgapi/mods/wireless/dipo/CpTurns.java
+--- a/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-04 23:42:01.489812315 +0000
++++ b/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-04 23:42:20.663613271 +0000
+@@ -857,9 +857,212 @@
+         cluster.tbtInfo(8, 0, 0f, 0f, 0, 0, 0, 0, -1);
+         cluster.tbtSubInfo(0f, -3, 15, 255, 255, 3, 3, 0f, 0, 255);
+         cluster.tbtSubInfo2C(15, 15, 65535, 15, 15, 65535, 15, 15, 65535);
++        cluster.destinationName(0, "");
++        cluster.crossroadName("");
++        stockReset();
+         Dipo.log("CarPlay: G70 cluster/HUD set to no guidance (" + why + ")");
+     }
+ 
++    // ---- G70 stock style (src-patches/11) ----
++
++    /**
++     * Setting g70_tbt_style = stock (the default from 2.4.0): the turn as the car's own
++     * navigation sends it (its log, 11/04 evening and 11/05 morning, stock guidance):
++     *   far from the turn: its icon, side streets 0, direction 1912.5 (none), combined side
++     *     streets 15, bar none (-1); the HUD list (0xF2) with up to 3 icons and the road name
++     *   near the turn: the junction picture: type 13 (intersection), 17 (highway exit), 31
++     *     (U-turn), 43 (ramp), with the side streets, the exit direction in degrees and the
++     *     distance bar (90 at the start, down to 10); the road name above it; the list empty
++     *   a tollgate (178): its icon, with a bar from 500 m
++     *   the arrival: type 3 with every value "none", the destination and name cleared
++     * TMAP sends no junction shape, so each turn gets the shape the car's navigation drew for
++     * the same kind of turn on these drives.
++     */
++    boolean stockStyle;
++    /** the maneuver whose junction picture is showing, and the distance (m) it started at */
++    int jctIndex = -1, jctStart;
++    /** what the HUD list and the name above the picture last were (not resent unchanged) */
++    String stockHudKey, stockName;
++    boolean arrivedSent;
++
++    static boolean has(String s, String... words) {
++        if (s == null) return false;
++        for (String w : words) if (s.contains(w)) return true;
++        return false;
++    }
++
++    /** TMAP sends tollgates as straight ahead; their name says it */
++    static boolean tollgate(Maneuver x) {
++        return x != null && (x.type == 3 || x.type == 5)
++                && (has(x.description, "TG", "\uD1A8\uAC8C\uC774\uD2B8", "\uC694\uAE08") || has(x.afterRoad, "TG", "\uD1A8\uAC8C\uC774\uD2B8"));
++    }
++
++    /** the far icon the car's navigation uses where it differs: highway exit right 164, keep right 161, exit left 82, tollgate 178 */
++    static int stockIcon(Maneuver x, int icon) {
++        if (x == null) return icon;
++        switch (x.type) {
++            case 23: return 164;
++            case 14: case 53: return 161;
++            case 22: return 82;
++            case 3: case 5: return tollgate(x) ? 178 : icon;
++            default: return icon;
++        }
++    }
++
++    /** the junction picture: {type, side streets, direction (degrees), starts within (m)}; null: icon only */
++    static float[] stockJunction(Maneuver x) {
++        if (x == null) return null;
++        switch (x.type) {
++            case 2: case 21: return new float[] { 13, 2065, 90f, 300 };     // right (11/05 08:23, a city right turn)
++            case 1: case 20: return new float[] { 13, 2065, 270f, 300 };    // left (11/05 08:21, a city left turn)
++            case 48: return new float[] { 13, 2081, 112.5f, 300 };          // sharp right
++            case 47: return new float[] { 13, 17414, 247.5f, 300 };         // sharp left
++            case 50: return new float[] { 13, 3, 22.5f, 300 };              // slight right
++            case 49: return new float[] { 13, 16385, 337.5f, 300 };         // slight left
++            case 4: case 18: case 26: return new float[] { 31, 0, 270f, 300 };   // U-turn
++            case 14: case 53: return new float[] { 13, 3, 22.5f, 600 };     // keep / change highway right
++            case 13: case 52: return new float[] { 13, 16385, 337.5f, 600 };   // keep / change highway left
++            case 23: return new float[] { 17, 0, 90f, 1000 };               // highway exit right
++            case 22: return new float[] { 43, 0, 270f, 600 };               // exit left
++            default: return null;
++        }
++    }
++
++    /** the distance bar: 90 when the picture starts, down to 10 */
++    static int stockBar(int m, int start) {
++        if (start <= 0) return 10;
++        return Math.max(10, Math.min(90, (int) Math.ceil(m * 9.0 / start) * 10));
++    }
++
++    static String stockNameOf(Maneuver x) {
++        if (x == null) return "";
++        if (x.afterRoad != null && x.afterRoad.length() > 0) return x.afterRoad;
++        return x.description == null ? "" : x.description;
++    }
++
++    void stockSend(Integer id, Update u, Maneuver x, int icon, float dist, int unit, int[] list) {
++        LinkedHashMap<Integer, Maneuver> m = maneuvers.get(id);
++        int[] ahead = aheadOf(list, m);
++        Maneuver y = ahead.length > 0 && m != null ? m.get(ahead[0]) : null;
++        Maneuver z = ahead.length > 1 && m != null ? m.get(ahead[1]) : null;
++        int meters = u.distNext;
++        float[] j = stockJunction(x);
++        if (x.index != jctIndex) jctIndex = -1;
++        if (j != null && meters > 0 && meters <= (int) j[3]) {
++            if (jctIndex != x.index) {
++                jctIndex = x.index;
++                jctStart = Math.max(meters, 50);
++                Dipo.log("CarPlay: G70 junction picture " + (int) j[0] + " (side " + (int) j[1] + ", " + j[2] + " deg) for maneuver "
++                        + x.index + " (type " + x.type + ") at " + meters + " m");
++            }
++            cluster.tbtInfo((int) j[0], (int) j[1], j[2], meters, 0, 0, Cluster.UNIT_M, stockBar(meters, jctStart), 0);
++            stockNear(x, meters, y, z);
++            return;
++        }
++        if (icon == 178 && meters > 0 && meters <= 500) {
++            cluster.tbtInfo(178, 0, 1912.5f, meters, 0, 15, Cluster.UNIT_M, Math.max(10, Math.min(50, (int) Math.ceil(meters / 100.0) * 10)), 0);
++            stockNear(x, meters, y, z);
++            return;
++        }
++        cluster.tbtInfo(icon, 0, 1912.5f, dist, 0, 15, unit, 0, -1);
++        stockName("");
++        int i2 = y == null || y.distance <= 0 ? 0 : stockIcon(y, iconOf(y, u.state));
++        int i3 = i2 == 0 || z == null || z.distance <= 0 ? 0 : stockIcon(z, iconOf(z, u.state));
++        stockHud(icon, i2, i3, stockNameOf(x));
++        cluster.tbtSubInfo2C(triple(dist, unit, 0), triple(dist, unit, 1), triple(dist, unit, 2),
++                tripleM(i2 == 0 ? -1 : y.distance, 0), tripleM(i2 == 0 ? -1 : y.distance, 1), tripleM(i2 == 0 ? -1 : y.distance, 2),
++                tripleM(i3 == 0 ? -1 : z.distance, 0), tripleM(i3 == 0 ? -1 : z.distance, 1), tripleM(i3 == 0 ? -1 : z.distance, 2));
++    }
++
++    /** near a turn or a tollgate: the name above the picture, the list empty, the HUD distance in metres */
++    void stockNear(Maneuver x, int meters, Maneuver y, Maneuver z) {
++        stockName(stockNameOf(x));
++        stockHud(0, 0, 0, null);
++        cluster.tbtSubInfo2C(0, 0, meters, tripleM(y == null ? -1 : y.distance, 0), tripleM(y == null ? -1 : y.distance, 1),
++                tripleM(y == null ? -1 : y.distance, 2), tripleM(z == null ? -1 : z.distance, 0), tripleM(z == null ? -1 : z.distance, 1),
++                tripleM(z == null ? -1 : z.distance, 2));
++    }
++
++    static int iconOf(Maneuver y, int state) {
++        int i = icon(y.type, y.side, y.junction, y.exit, state);
++        if (i == 0) i = g70Icon(y.type, y.side, y.exit, state);
++        return i;
++    }
++
++    void stockName(String name) {
++        if (name == null) name = "";
++        if (name.equals(stockName)) return;
++        stockName = name;
++        cluster.crossroadName(name);
++    }
++
++    /** the HUD list as the car's navigation sends it: F2, count, 3 icons, the road name (UTF-16LE), 4 zero bytes; empty near a turn */
++    void stockHud(int i1, int i2, int i3, String name) {
++        String key = i1 + "/" + i2 + "/" + i3 + "/" + name;
++        if (key.equals(stockHudKey)) return;
++        stockHudKey = key;
++        if (i1 == 0) {
++            cluster.turnListNew(new byte[] { (byte) 0xF2, 0, 0 });
++            return;
++        }
++        byte[] r;
++        try {
++            r = (name == null ? "" : name).getBytes("UTF-16LE");
++        } catch (java.io.UnsupportedEncodingException e) {
++            r = new byte[0];
++        }
++        int n = Math.min(r.length, 76);
++        byte[] f = new byte[5 + n + 4];
++        f[0] = (byte) 0xF2;
++        f[1] = (byte) (i3 != 0 ? 3 : i2 != 0 ? 2 : 1);
++        f[2] = (byte) i1;
++        f[3] = (byte) i2;
++        f[4] = (byte) i3;
++        System.arraycopy(r, 0, f, 5, n);
++        cluster.turnListNew(f);
++        hudType = i1;
++    }
++
++    /** one value of a 2C distance triple {unit, tenths, whole} for the phone's distance; k: 0 unit, 1 tenths, 2 whole */
++    static int triple(float f, int unit, int k) {
++        if (f < 0f || unit < 0 || unit > 4) return k == 2 ? 65535 : 15;
++        int whole = Math.min((int) f, 4095);
++        int tenths = 0;
++        if (unit == Cluster.UNIT_KM || unit == Cluster.UNIT_MI) tenths = Math.max(0, Math.min(9, (int) ((f - (int) f) * 10f + 0.5f)));
++        return k == 0 ? unit : k == 1 ? tenths : whole;
++    }
++
++    /** the same for a distance in metres (km from 1000 m, as the car's navigation); negative: none (15, 15, 65535) */
++    static int tripleM(int m, int k) {
++        if (m < 0) return k == 2 ? 65535 : 15;
++        if (m < 1000) return k == 0 ? Cluster.UNIT_M : k == 1 ? 0 : m;
++        int tenths = (m % 1000 + 50) / 100;
++        int whole = m / 1000;
++        if (tenths >= 10) {
++            tenths = 0;
++            whole++;
++        }
++        return k == 0 ? Cluster.UNIT_KM : k == 1 ? tenths : Math.min(whole, 4095);
++    }
++
++    /** arrived (state 2), once: as the car's navigation (11/04 18:52:58, 11/05 08:25:27) */
++    void stockArrived() {
++        if (arrivedSent) return;
++        arrivedSent = true;
++        cluster.tbtInfo(3, 65535, 1912.5f, 65535.15f, -3, 15, 15, 0, -1);
++        cluster.destinationName(0, "");
++        stockName("");
++        stockHud(0, 0, 0, null);
++        g70Shown = true;
++        Dipo.log("CarPlay: G70 arrived (as the car's navigation)");
++    }
++
++    void stockReset() {
++        stockHudKey = null;
++        stockName = null;
++        jctIndex = -1;
++    }
++
+     /** forget every component's state and maneuvers (DiPO e/u.nT) */
+     void reset() {
+         sentDest = null;
+@@ -913,6 +1116,11 @@
+             dbgWhy("state " + u.state + " just after DiPO's stop: ignored");
+             return;
+         }
++        if (stockStyle && u.state == 2) {
++            stockArrived();
++            return;
++        }
++        arrivedSent = false;
+         int[] list = u.list == null ? null : u.list.clone();
+         float dist = 0f;
+         if (u.nextStr != null && !u.nextStr.equals("")) {
+@@ -961,13 +1169,20 @@
+                 icon = h;
+             }
+         }
+-        cluster.crossroadName(x.afterRoad);
++        if (!stockStyle) cluster.crossroadName(x.afterRoad);
+         if (icon == 0) {
+             dbgWhy("no cluster icon for maneuver type " + x.type + " side " + x.side + " junction " + x.junction + " exit " + x.exit);
+             return;
+         }
+         dbgWhy("sending: icon " + icon + " for type " + x.type + " (exit " + x.exit + ") unit " + unit + " state " + u.state
+                 + " list " + list.length + (gpmStyle ? " gpm" : ""));
++        if (stockStyle) {
++            stockSend(id, u, x, stockIcon(x, icon), dist, unit, list);
++            g70Shown = true;
++            sendTrip(u);
++            sendAhead(id, u);
++            return;
++        }
+         if (gpmStyle) cluster.tbtInfo(icon, 65535, direction(icon), dist, 0, 0, unit, 32, 0);
+         else cluster.tbtInfo(icon, 0, 0f, dist, 0, 0, unit, 0, 0);
+         g70Shown = true;
+@@ -1260,6 +1475,7 @@
+ 
+     /** HUD list and extras cleared (the build's sendHudBlank) */
+     void hudBlank() {
++        stockReset();   // G70 (src-patches/11): the stock style's list and name are sent again after this
+         cluster.tbtSubInfo2C(0, 0, 0, 0, 0, 0, 0, 0, 0);
+         byte[] lanes = new byte[81];
+         lanes[0] = (byte) 0xF1;
+diff -ruN a/src/hmgapi/mods/wireless/dipo/Dipo.java b/src/hmgapi/mods/wireless/dipo/Dipo.java
+--- a/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-04 23:42:01.489488633 +0000
++++ b/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-04 23:42:01.509529708 +0000
+@@ -143,7 +143,10 @@
+         rg = new RgListener();
+         // G70: tbtInfo as DiPO sends it (default) or as Hyundai's Android Auto manager does
+         CpTurns.debug = mod.settingBoolean("g70_debug", true);
+-        turns.gpmStyle = "gpm".equals(mod.settingString("g70_tbt_style", "dipo"));
++        String style = mod.settingString("g70_tbt_style", "stock");
++        turns.gpmStyle = "gpm".equals(style);
++        turns.stockStyle = "stock".equals(style);   // G70 (src-patches/11): as the car's navigation, the default
++        if (turns.stockStyle) log("CarPlay: G70 turn style stock (as the car's navigation: junction pictures, bar, tollgate)");
+         if (turns.gpmStyle) log("CarPlay: G70 turn style gpm (side street 65535, direction, bar 32)");
+         // G70: HUD icon test (off unless the owner picks codes in the mod's settings)
+         turns.testCodes = CpTurns.testCodes(mod.settingString("g70_icon_test", "off"));

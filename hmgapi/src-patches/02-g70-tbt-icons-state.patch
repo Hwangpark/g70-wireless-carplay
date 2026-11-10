@@ -1,0 +1,260 @@
+diff -ru a/src/hmgapi/mods/wireless/dipo/CpTurns.java b/src/hmgapi/mods/wireless/dipo/CpTurns.java
+--- a/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-03 07:52:00.528344693 +0000
++++ b/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-03 07:53:12.053434845 +0000
+@@ -116,6 +116,114 @@
+         this.restart = restart;
+     }
+ 
++    /** G70: what the iAP2 listener passed with the message being handled (arg1, arg2) */
++    int a1, a2;
++    /**
++     * G70: the source name whose update last set a route state above 0, the last name
++     * seen (nameless updates belong to it), and when the guiding name was last heard
++     */
++    String navName, lastName;
++    long navAt;
++    int skipped, dbgStates;
++    Runnable pendingStop;
++    final java.util.HashSet<Integer> g70Logged = new java.util.HashSet<Integer>();
++
++    /**
++     * G70: a "no route" (state 0) from a source name other than the one guiding. A Korean
++     * iPhone sends route guidance under two names (G70 log, 11/03): "Apple 지도" with state
++     * 0 or 3 and "Apple Maps" with the route (state 6, maneuvers), one after the other.
++     * Each state 0 blanked the HUD under the route. While one name guides, a state 0 from
++     * the other (or a nameless one right after it) keeps the guiding state; the guiding
++     * name's own state 0 ends guidance as before, and so does 30 s without a word from it.
++     */
++    boolean g70Other(Iap2NotiMsg msg) {
++        String name = null;
++        int st = -1;
++        Iap2NotiMsg.Iap2ObjGroup g = msg.getItemGroup();
++        if (g == null) return false;
++        for (int k = 0; k < g.getItemCnt(); k++) {
++            Iap2NotiMsg.Iap2ObjItem it = g.getObjItem(k);
++            if (it == null || it.getItemObjCount() <= 0) continue;
++            try {
++                if (it.getItemId() == 19 && it.getItemParamType() == 10) {
++                    String[] v = it.getItemStringArray();
++                    if (v != null && v.length > 0 && v[0] != null && v[0].length() > 0) name = v[0];
++                } else if (it.getItemId() == 1 && it.getItemParamType() == 8) {
++                    int[] v = it.getItemIntArray();
++                    if (v != null && v.length > 0) st = v[0];
++                }
++            } catch (Throwable x) {
++                // an item it can't read: as if it wasn't there
++            }
++        }
++        String who = name != null ? name : lastName;
++        if (name != null) lastName = name;
++        long now = android.os.SystemClock.elapsedRealtime();
++        if (st >= 0 && dbgStates < 300) {
++            dbgStates++;
++            Dipo.log("CarPlay dbg state " + st + " from " + (name != null ? name : "(" + who + ")") + " arg " + a1 + "/" + a2);
++        }
++        if (st > 0) {
++            if (who != null && !who.equals(navName)) Dipo.log("CarPlay: route guidance state " + st + " from " + who);
++            if (who != null) navName = who;
++            navAt = now;
++            cancelStop();
++            return false;
++        }
++        if (navName == null || who == null) return false;
++        if (who.equals(navName)) {
++            navAt = now;
++            return false;
++        }
++        if (st != 0 || now - navAt > 30000L) return false;
++        skipped++;
++        if (skipped == 1 || skipped == 10 || skipped == 100 || skipped % 1000 == 0)
++            Dipo.log("CarPlay: kept " + navName + "'s route over " + skipped + " \"no route\" update(s) from " + who);
++        scheduleStop(30000L);
++        return true;
++    }
++
++    /** G70: end guidance if the guiding name stays quiet for 30 s after a kept "no route" */
++    void scheduleStop(long delay) {
++        if (pendingStop != null || Dipo.turnsHandler == null) return;
++        pendingStop = new Runnable() {
++            @Override
++            public void run() {
++                pendingStop = null;
++                try {
++                    if (navName == null) return;
++                    long quiet = android.os.SystemClock.elapsedRealtime() - navAt;
++                    if (quiet < 30000L) {
++                        scheduleStop(30000L - quiet);
++                        return;
++                    }
++                    Dipo.log("CarPlay: nothing from " + navName + " for 30 s after a \"no route\": guidance ended");
++                    navName = null;
++                    for (Update u : updates.values()) {
++                        if (u != null) u.state = 0;
++                    }
++                    stop();
++                } catch (Throwable x) {
++                    Dipo.error("CarPlay turn-by-turn", x);
++                }
++            }
++        };
++        Dipo.turnsHandler.postDelayed(pendingStop, delay);
++    }
++
++    void cancelStop() {
++        if (pendingStop == null) return;
++        if (Dipo.turnsHandler != null) Dipo.turnsHandler.removeCallbacks(pendingStop);
++        pendingStop = null;
++    }
++
++    /** Update.read, keeping the guiding state over a kept "no route" */
++    static void g70Read(int id, Update u, Iap2NotiMsg msg, boolean keep) {
++        int was = u.state;
++        u.read(id, msg);
++        if (keep && u.state == 0 && was > 0) u.state = was;
++    }
++
+     /** RouteGuidanceUpdate (DiPO e/u.c) */
+     void routeGuidance(Iap2NotiMsg msg) {
+         if (msg == null) return;
+@@ -124,11 +232,12 @@
+             dbgDump("RG#" + dbgRg, msg);
+         }
+         sourceCheck(msg);
++        boolean keep = g70Other(msg);
+         int[] ids = componentIds(msg);
+         if (ids == null) {
+             for (Integer id : updates.keySet()) {
+                 Update u = updates.get(id);
+-                if (u != null) u.read(id, msg);
++                if (u != null) g70Read(id, u, msg, keep);
+                 turn(id, u);
+             }
+             return;
+@@ -137,7 +246,7 @@
+             Integer id = ids[k];
+             Update u = updates.get(id);
+             if (u != null) {
+-                u.read(id, msg);
++                g70Read(id, u, msg, keep);
+             } else {
+                 u = new Update(id, msg);
+                 updates.put(id, u);
+@@ -305,6 +414,9 @@
+         reset();
+         hudBlank();
+         source = null;
++        navName = null;
++        lastName = null;
++        cancelStop();
+     }
+ 
+     /** route guidance stopped (DiPO e/u.nS: the car's navigation took turn-by-turn back, or state 0) */
+@@ -389,12 +501,17 @@
+             default: unit = Cluster.UNIT_M; break;
+         }
+         int icon = icon(x.type, x.side, x.junction, x.exit, u.state);
++        if (icon == 0) {
++            icon = g70Icon(x.type, x.side, x.exit, u.state);
++            if (icon != 0 && g70Logged.add(x.type))
++                Dipo.log("CarPlay: G70 icon " + icon + " for maneuver type " + x.type + " (side " + x.side + " junction " + x.junction + " exit " + x.exit + ")");
++        }
+         cluster.crossroadName(x.afterRoad);
+         if (icon == 0) {
+             dbgWhy("no cluster icon for maneuver type " + x.type + " side " + x.side + " junction " + x.junction + " exit " + x.exit);
+             return;
+         }
+-        dbgWhy("sending: icon " + icon + " dist " + dist + " unit " + unit + " state " + u.state);
++        dbgWhy("sending: icon " + icon + " unit " + unit + " state " + u.state);
+         cluster.tbtInfo(icon, 0, 0f, dist, 0, 0, unit, 0, 0);
+         sendHud(icon, id, u);
+         sendHudDist(dist, unit);
+@@ -474,6 +591,57 @@
+         }
+     }
+ 
++    /**
++     * G70: an icon for the maneuvers the build's table leaves blank (0), so the cluster
++     * and HUD aren't left showing nothing: Apple Maps starts every route with "start
++     * route" (11), and Korean routes are full of keep left / keep right (13, 14) and
++     * turns at angles the table doesn't list. Only icons the table itself uses: 65
++     * straight, 66-68 slight/normal/sharp right, 69-71 sharp/normal/slight left, 72/73
++     * U-turn, 81/82 off ramp right/left, 112 destination (3 once arrived), 176 ferry.
++     */
++    static int g70Icon(int type, int side, int exit, int state) {
++        switch (type) {
++            case 0: case 3: case 5: case 9: case 11: case 51:   // no turn, straight, follow road, on ramp, start route, change highway
++                return 65;
++            case 1: case 20: case 47: case 49:   // left, left at end, sharp left, slight left
++                return left(exit, type == 47 ? 69 : type == 49 ? 71 : 70);
++            case 2: case 21: case 48: case 50:   // right, right at end, sharp right, slight right
++                return right(exit, type == 48 ? 68 : type == 50 ? 66 : 67);
++            case 13: case 52:   // keep left, change highway left
++                return 71;
++            case 14: case 53:   // keep right, change highway right
++                return 66;
++            case 4: case 18: case 26:   // U-turn, start route with U-turn, U-turn when possible
++                return side == 1 ? 73 : 72;
++            case 8: return side == 1 ? 82 : 81;   // off ramp: the side traffic exits on
++            case 22: return 82;
++            case 23: return 81;
++            case 10: case 12: case 24: case 25: case 27:   // arrive
++                return state == 2 ? 3 : 112;
++            case 15: case 16: case 17: return 176;   // ferry
++            default:   // roundabouts (6, 7, 19, 28-46) and anything newer: by the exit angle
++                if (exit < -22) return left(exit, 70);
++                if (exit > 22) return right(exit, 67);
++                return 65;
++        }
++    }
++
++    /** a left turn by its exit angle (0: unknown, the given icon) */
++    static int left(int exit, int none) {
++        int a = Math.abs(exit);
++        if (a == 0) return none;
++        if (a <= 52) return 71;
++        return a <= 112 ? 70 : 69;
++    }
++
++    /** a right turn by its exit angle (0: unknown, the given icon) */
++    static int right(int exit, int none) {
++        int a = Math.abs(exit);
++        if (a == 0) return none;
++        if (a <= 52) return 66;
++        return a <= 112 ? 67 : 68;
++    }
++
+     /** an upcoming turn's small icon (HUD list and turn list): 64 none, 65 straight, 66-68 right, 69-71 left, 72/73 U-turn */
+     static int aheadIcon(int type, int side, int junction, int exit) {
+         if (type == 1) {
+diff -ru a/src/hmgapi/mods/wireless/dipo/Dipo.java b/src/hmgapi/mods/wireless/dipo/Dipo.java
+--- a/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-03 07:52:00.528554254 +0000
++++ b/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-03 07:53:21.577043969 +0000
+@@ -134,6 +134,10 @@
+             @Override
+             protected void beforeHookedMethod(Param p) {
+                 if (OWN.get() != null) return;
++                if (dbgStops < 20) {
++                    dbgStops++;
++                    log("CarPlay dbg: DiPO stops route guidance (" + dbgStops + ")");
++                }
+                 post(new Runnable() {
+                     @Override
+                     public void run() {
+@@ -189,6 +193,8 @@
+     /** HMG-API's iAP2 listener for route guidance: everything goes to CpTurns on its thread */
+     /** G70 debug: notification codes seen by the route guidance listener */
+     static final java.util.Set<Integer> SEEN = new java.util.HashSet<Integer>();
++    /** G70 debug: how many of DiPO's own route guidance stops were logged */
++    static int dbgStops;
+ 
+     static final class RgListener extends IIap2Listener.Stub {
+         @Override
+@@ -215,6 +221,8 @@
+             post(new Runnable() {
+                 @Override
+                 public void run() {
++                    turns.a1 = a1;   // G70: logged with each route state (which link sent it)
++                    turns.a2 = a2;
+                     if (what == RG_UPDATE) turns.routeGuidance(msg);
+                     else if (what == RG_MANEUVER) turns.maneuver(msg);
+                     else turns.lanes(msg);

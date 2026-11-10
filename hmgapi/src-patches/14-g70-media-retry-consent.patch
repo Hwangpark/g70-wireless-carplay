@@ -1,0 +1,93 @@
+diff -ruN a/src/hmgapi/mods/wireless/dipo/G70Extra.java b/src/hmgapi/mods/wireless/dipo/G70Extra.java
+--- a/src/hmgapi/mods/wireless/dipo/G70Extra.java	2026-11-05 01:31:22.456283432 +0000
++++ b/src/hmgapi/mods/wireless/dipo/G70Extra.java	2026-11-05 01:31:22.507684306 +0000
+@@ -16,7 +16,8 @@
+  * DiPO makes them for USB. The K8 HEV package does the same ("곡 정보 구독").
+  *
+  * The startup agreement (setting g70_agree_notice, off by default): the screen the car
+- * shows at every start until the driver presses agree. When the owner turns this on,
++ * shows at every start until the driver presses agree. 2.5.2: also the car navigation's
++ * consent (the regulation service's occupation consent, which its engine asks for). When the owner turns this on,
+  * HMG-API presses it for them through the car's own call (ModeManager.agreeUserLicense,
+  * what the agree button does), once per start. The research log records the agreement's
+  * state (ModeManager.isUserClickedAgree) and the regulation service's consent and popup
+@@ -62,13 +63,36 @@
+         later(new Runnable() {
+             @Override
+             public void run() {
+-                StringBuilder s = new StringBuilder();
+-                for (String m : MEDIA_CALLS) s.append(s.length() == 0 ? "" : ", ").append(call(iap2, m));
+-                mediaStarts++;
+-                Dipo.log("G70: song and call info asked for on wireless CarPlay (" + mediaStarts + "): " + s);
+-                Research.line("media: " + s);
++                askMedia(iap2);
+             }
+-        }, 1000, "hmgapi-g70-media");
++        }, FIRST_TRY_MS, "hmgapi-g70-media");
++    }
++
++    /** 2.5.2: right after the channel's session connects it's still authenticating, and the server says false (11/05 10:17) */
++    static long FIRST_TRY_MS = 2500, RETRY_MS = 2000;
++    static final int TRIES = 8;
++
++    static void askMedia(Object iap2) {
++        String np = null;
++        int tries = 0;
++        while (tries < TRIES) {
++            tries++;
++            np = call(iap2, MEDIA_CALLS[0]);
++            if (np.endsWith(" true")) break;
++            Research.line("media: try " + tries + ": " + np);
++            if (tries < TRIES && !now) {
++                try {
++                    Thread.sleep(RETRY_MS);
++                } catch (InterruptedException e) {
++                    return;
++                }
++            }
++        }
++        StringBuilder s = new StringBuilder(np);
++        for (int i = 1; i < MEDIA_CALLS.length; i++) s.append(", ").append(call(iap2, MEDIA_CALLS[i]));
++        mediaStarts++;
++        Dipo.log("G70: song and call info asked for on wireless CarPlay (" + mediaStarts + ", try " + tries + "): " + s);
++        Research.line("media: " + s);
+     }
+ 
+     /** a no-argument call on the iAP2 server (the methods are DiPO's com.tcc.iap2.IIap2Service's) */
+@@ -127,8 +151,34 @@
+             Dipo.log("G70: startup agreement pressed for the owner (setting g70_agree_notice): " + r);
+             Research.line("agree: pressed for the owner: " + r);
+         }
+-        // research watches the whole time; agreeing alone stops once it's done
+-        return !Research.on && (agreed || Boolean.TRUE.equals(clicked));
++        // 2.5.2: the screen the owner meant is the navigation's: on 11/05 the mode manager's
++        // agreement was already given 7 s after the start, while the regulation service's
++        // occupation consent (what the car navigation's engine asks for) stayed 0 with its
++        // popup state 1. The consent is set as the navigation sets it when its button is pressed.
++        Integer one = Integer.valueOf(1);
++        if (agree && !occupationSet && consent instanceof Integer && !one.equals(consent) && one.equals(popup)) {
++            occupationSet = true;
++            String r = callInt(reg, "setOccupationConsentState", 1);
++            Dipo.log("G70: navigation consent given for the owner (setting g70_agree_notice): " + r);
++            Research.line("agree: navigation (occupation) consent given for the owner: " + r);
++        }
++        // research watches the whole time; agreeing alone stops once both are done
++        boolean modeDone = agreed || Boolean.TRUE.equals(clicked);
++        boolean occupationDone = occupationSet || one.equals(consent);
++        return !Research.on && (!agree || (modeDone && occupationDone));
++    }
++
++    static boolean occupationSet;
++
++    static String callInt(Object o, String name, int v) {
++        try {
++            Object r = o.getClass().getMethod(name, int.class).invoke(o, v);
++            return name + "(" + v + ") " + (r == null ? "done" : r);
++        } catch (java.lang.reflect.InvocationTargetException x) {
++            return name + " failed: " + x.getCause();
++        } catch (Throwable x) {
++            return name + " failed: " + x;
++        }
+     }
+ 
+     static Object modeManager(Context c) {

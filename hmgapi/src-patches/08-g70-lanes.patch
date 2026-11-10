@@ -1,0 +1,535 @@
+diff -ruN a/src/hmgapi/mods/wireless/Wireless.java b/src/hmgapi/mods/wireless/Wireless.java
+--- a/src/hmgapi/mods/wireless/Wireless.java	2026-11-04 00:18:48.342468265 +0000
++++ b/src/hmgapi/mods/wireless/Wireless.java	2026-11-04 00:20:00.715887389 +0000
+@@ -98,11 +98,16 @@
+                 }
+             });
+         }
+-        if (research) {
++        // G70 (src-patches/08): while the phone guides and its lanes go to the cluster, the
++        // car navigation's own lanes (it sends them even without a route) are held back
++        final boolean lanes = tbt && mod.settingBoolean("g70_lanes", true);
++        if (research || lanes) {
+             mod.hook(null, "framework.navigation_cluster.update_lane_info", new MethodHook() {
+                 @Override
+                 protected void beforeHookedMethod(Param p) {
+-                    G70Research.naviCall("update_lane_info", p.args, false);
++                    boolean skip = lanes && Car.phoneGuiding(app.context);
++                    if (research) G70Research.naviCall("update_lane_info", p.args, skip);
++                    if (skip) p.setResult(null);
+                 }
+             });
+         }
+diff -ruN a/src/hmgapi/mods/wireless/dipo/Bridge.java b/src/hmgapi/mods/wireless/dipo/Bridge.java
+--- a/src/hmgapi/mods/wireless/dipo/Bridge.java	2026-11-04 00:18:48.342613805 +0000
++++ b/src/hmgapi/mods/wireless/dipo/Bridge.java	2026-11-04 00:20:00.714521629 +0000
+@@ -238,6 +238,7 @@
+             if (data == null || len <= 0 || sUsb) return;
+             if (len >= data.length) len = data.length;
+             Research.iap("cp<", data, len);
++            G70Lanes.feed(data, len);
+             byte[] b = new byte[len];
+             System.arraycopy(data, 0, b, 0, len);
+             if (!sCpClient) startCpClient("iAP2 data from CarPlay channel");
+diff -ruN a/src/hmgapi/mods/wireless/dipo/CpTurns.java b/src/hmgapi/mods/wireless/dipo/CpTurns.java
+--- a/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-04 00:18:48.334605798 +0000
++++ b/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-04 00:19:23.913835843 +0000
+@@ -6,6 +6,7 @@
+ import com.tcc.iap2.Iap2NotiMsg;
+ 
+ import java.util.Calendar;
++import java.util.HashMap;
+ import java.util.LinkedHashMap;
+ 
+ import hmgapi.hook.Car;
+@@ -278,6 +279,7 @@
+                 Update u = updates.get(id);
+                 if (u != null) g70Read(id, u, msg, keep);
+                 turn(id, u);
++                g70LaneTick(u);
+             }
+             return;
+         }
+@@ -291,6 +293,7 @@
+                 updates.put(id, u);
+             }
+             turn(id, u);
++            g70LaneTick(u);
+         }
+     }
+ 
+@@ -464,6 +467,8 @@
+     void stop() {
+         hudBlank();
+         sentDest = null;
++        laneSent = null;
++        phoneLanes.clear();
+     }
+ 
+     /** G70: the destination name last sent outside state 6 (null: none yet for this route) */
+@@ -500,6 +505,11 @@
+     /** the codes for a g70_icon_test choice; null when off */
+     static int[] testCodes(String choice) {
+         if (choice == null) return null;
++        if (choice.equals("lanes")) {
++            int[] r = new int[LANE_TEST.length];
++            for (int k = 0; k < r.length; k++) r[k] = k + 1;
++            return r;
++        }
+         if (choice.equals("known")) {
+             return new int[] { 3, 65, 66, 67, 68, 69, 70, 71, 72, 73, 81, 82, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106,
+                     107, 112, 113, 114, 144, 145, 172, 173, 174, 176 };
+@@ -550,6 +560,16 @@
+     void stepTest() {
+         if (testCodes == null || testAt < 0 || testAt >= testCodes.length) return;
+         int code = testCodes[testAt++];
++        if (laneTest) {
++            stepLaneTest(code);
++            if (testAt < testCodes.length) {
++                scheduleTest(3000L);
++            } else {
++                Dipo.log("CarPlay: lane test done, route guidance shows again with the next update");
++                endLaneTest();
++            }
++            return;
++        }
+         Dipo.log("CarPlay: HUD icon test " + testAt + "/" + testCodes.length + ": code " + code);
+         cluster.crossroadName("TEST " + code);
+         cluster.tbtInfo(code, 0, 0f, code, 0, 0, Cluster.UNIT_M, 0, 0);
+@@ -575,12 +595,196 @@
+         testAt = testCodes.length;
+         if (testStep != null && Dipo.turnsHandler != null) Dipo.turnsHandler.removeCallbacks(testStep);
+         hudType = -1;
++        if (laneTest) endLaneTest();
+         Dipo.log("CarPlay: HUD icon test stopped (" + why + ")");
+     }
+ 
++    // ---- G70 lanes (src-patches/08) ----
++
++    /** setting g70_lanes: the phone's lane guidance (0x5204, read from the CarPlay channel by G70Lanes) to the cluster */
++    boolean lanesOn;
++    /** the cluster's lane status for a preferred lane (setting g70_lane_highlight; the build used 2) */
++    int laneHi = 2;
++    /** setting g70_icon_test = lanes: the test sends lane frames instead of icons */
++    boolean laneTest;
++    /** lane guidance index -> lanes, each {iAP2 status, highlighted (0/1), highlight angle, angles...} */
++    final HashMap<Integer, int[][]> phoneLanes = new HashMap<Integer, int[][]>();
++    /** the lane frame last sent as hex ("": cleared), null: none since the route began */
++    String laneSent;
++
++    /**
++     * G70Lanes: one LaneGuidanceInformation from the phone. The car's iAP2 server drops it
++     * (its route guidance component is declared without lane capacity, so it never becomes
++     * notification 122), but the phone sends it anyway (drive log 11/04: 45 of them while
++     * RouteGuidanceUpdate said lanes showing). Shown when an update names its index.
++     */
++    void g70Lanes(int index, int[][] lanes) {
++        if (!lanesOn || lanes == null) return;
++        if (phoneLanes.size() > 64) phoneLanes.clear();
++        phoneLanes.put(index, lanes);
++        for (Update u : updates.values()) {
++            if (u != null && u.state > 0) {
++                g70LaneTick(u);
++                return;
++            }
++        }
++    }
++
++    /** after each RouteGuidanceUpdate: the lanes it says are showing (items 16, 18), or none */
++    void g70LaneTick(Update u) {
++        if (!lanesOn || u == null) return;
++        if (testCodes != null && testAt >= 0 && testAt < testCodes.length) return;   // a test is on screen
++        int[][] l = u.state > 0 && u.lanesShown ? phoneLanes.get(u.laneIndex) : null;
++        if (l == null) {
++            if (laneSent != null && laneSent.length() > 0) {
++                byte[] f = new byte[81];
++                f[0] = (byte) 0xF1;
++                cluster.laneInfo(f);
++                laneSent = "";
++                if (debug) Dipo.log("CarPlay dbg lanes cleared");
++            }
++            return;
++        }
++        byte[] f = laneFrame(l, laneHi);
++        String key = hexOf(f, 2 + 8 + 24 + 16);
++        if (key.equals(laneSent)) return;
++        cluster.laneInfo(f);
++        laneSent = key;
++        Dipo.log("CarPlay: G70 lanes to the cluster (index " + u.laneIndex + "): " + laneText(f));
++    }
++
++    /** the cluster's 0xF1 frame: [1] lanes, [3+k] status (1, or the highlight value), [19+3k..21+3k] arrows */
++    static byte[] laneFrame(int[][] lanes, int hi) {
++        byte[] f = new byte[81];
++        f[0] = (byte) 0xF1;
++        int n = Math.min(lanes.length, 8);
++        f[1] = (byte) n;
++        for (int k = 0; k < n; k++) {
++            int[] one = lanes[k];
++            if (one == null || one.length < 3) continue;
++            boolean preferred = one[0] == 2 || one[1] != 0;
++            f[k + 3] = (byte) (preferred ? hi : 1);
++            int[] arrows = new int[3];
++            int m = 0;
++            if (one[1] != 0) arrows[m++] = laneIcon(one[2]);
++            for (int j = 3; j < one.length && m < 3; j++) {
++                int a = laneIcon(one[j]);
++                boolean dup = false;
++                for (int x = 0; x < m; x++) dup |= arrows[x] == a;
++                if (!dup) arrows[m++] = a;
++            }
++            if (m == 0) arrows[m++] = 1;
++            for (int j = 0; j < 3; j++) f[k * 3 + 19 + j] = (byte) arrows[j];
++        }
++        return f;
++    }
++
++    static String hexOf(byte[] f, int max) {
++        StringBuilder b = new StringBuilder();
++        for (int k = 0; k < f.length && k < max; k++) {
++            String x = Integer.toHexString(f[k] & 0xff);
++            b.append(x.length() == 1 ? "0" : "").append(x);
++        }
++        return b.toString();
++    }
++
++    /** "3 lanes: 1[7] 2[1] 1[1,3]": status[arrows] per lane */
++    static String laneText(byte[] f) {
++        int n = f[1];
++        StringBuilder b = new StringBuilder().append(n).append(" lanes:");
++        for (int k = 0; k < n && k < 8; k++) {
++            b.append(' ').append(f[k + 3]).append('[');
++            for (int j = 0; j < 3; j++) {
++                int a = f[k * 3 + 19 + j];
++                if (a == 0) continue;
++                if (j > 0) b.append(',');
++                b.append(a);
++            }
++            b.append(']');
++        }
++        return b.toString();
++    }
++
++    /** the lane test (setting g70_icon_test = lanes): what each step sends, and its name */
++    static final String[] LANE_TEST = {
++        "4 lanes: left, straight, straight, right; all status 1",
++        "the same, lane 3 status 2",
++        "the same, lane 3 status 3",
++        "the same, lane 3 status 4",
++        "the same, lane 3 status 5",
++        "lanes 2 and 3 status 2; lane 3 straight + right",
++        "the car's navigation, 6 lanes (copied from its log)",
++        "the car's navigation, 4 lanes with flag 0x10, lane 1 status 5 (copied)",
++        "8 lanes straight, lanes 4 and 5 status 2",
++        "no lanes (cleared)",
++    };
++
++    static byte[] laneTestFrame(int step) {
++        byte[] f = new byte[81];
++        f[0] = (byte) 0xF1;
++        int[][] arrows = null;
++        int[] status = null;
++        switch (step) {
++            case 1: case 2: case 3: case 4: case 5:
++                status = new int[] { 1, 1, step == 1 ? 1 : step, 1 };
++                arrows = new int[][] { { 7 }, { 1 }, { 1 }, { 3 } };
++                break;
++            case 6:
++                status = new int[] { 1, 2, 2, 1 };
++                arrows = new int[][] { { 7 }, { 1 }, { 1, 3 }, { 3 } };
++                break;
++            case 7:
++                status = new int[] { 1, 1, 1, 1, 1, 1 };
++                arrows = new int[][] { { 1 }, { 1 }, { 1 }, { 1 }, { 1 }, { 2 } };
++                f[2] = 1;
++                break;
++            case 8:
++                status = new int[] { 5, 1, 1, 1 };
++                arrows = new int[][] { { 14, 10 }, { 7 }, { 1 }, { 1 } };
++                f[2] = 0x10;
++                break;
++            case 9:
++                status = new int[] { 1, 1, 1, 2, 2, 1, 1, 1 };
++                arrows = new int[][] { { 1 }, { 1 }, { 1 }, { 1 }, { 1 }, { 1 }, { 1 }, { 1 } };
++                break;
++            default:
++                return f;
++        }
++        f[1] = (byte) status.length;
++        for (int k = 0; k < status.length; k++) {
++            f[k + 3] = (byte) status[k];
++            for (int j = 0; j < arrows[k].length && j < 3; j++) f[k * 3 + 19 + j] = (byte) arrows[k][j];
++        }
++        return f;
++    }
++
++    /** one lane test step: a right turn with the step as its distance (HUD too), the lanes, the step's name on the cluster */
++    void stepLaneTest(int step) {
++        byte[] f = laneTestFrame(step);
++        Dipo.log("CarPlay: lane test " + step + "/" + LANE_TEST.length + ": " + LANE_TEST[step - 1] + " (" + laneText(f) + ")");
++        cluster.crossroadName("LANE " + step);
++        cluster.tbtInfo(67, 0, 0f, step, 0, 0, Cluster.UNIT_M, 0, 0);
++        byte[] h = new byte[5];
++        h[0] = (byte) 0xF2;
++        h[1] = 1;
++        h[2] = 67;
++        cluster.turnListNew(h);
++        cluster.tbtSubInfo2C(Cluster.UNIT_M, 0, step, 0, 0, 0, 0, 0, 0);
++        cluster.laneInfo(f);
++    }
++
++    void endLaneTest() {
++        byte[] f = new byte[81];
++        f[0] = (byte) 0xF1;
++        cluster.laneInfo(f);
++        laneSent = null;
++        hudType = -1;
++    }
++
+     /** forget every component's state and maneuvers (DiPO e/u.nT) */
+     void reset() {
+         sentDest = null;
++        phoneLanes.clear();
+         for (LinkedHashMap<Integer, Maneuver> m : maneuvers.values()) {
+             if (m != null) m.clear();
+         }
+diff -ruN a/src/hmgapi/mods/wireless/dipo/Dipo.java b/src/hmgapi/mods/wireless/dipo/Dipo.java
+--- a/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-04 00:18:48.342746752 +0000
++++ b/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-04 00:20:54.432849163 +0000
+@@ -75,6 +75,11 @@
+         mod.error(m, t);
+     }
+ 
++    /** G70: a line for the research log (src-patches/07), when it's on */
++    static void research(String m) {
++        Research.line(m);
++    }
++
+     /** Wireless.appLoaded, in DiPO's process */
+     public static void start(ModContext m, LoadedApp a) {
+         mod = m;
+@@ -138,6 +143,15 @@
+         if (turns.gpmStyle) log("CarPlay: G70 turn style gpm (side street 65535, direction, bar 32)");
+         // G70: HUD icon test (off unless the owner picks codes in the mod's settings)
+         turns.testCodes = CpTurns.testCodes(mod.settingString("g70_icon_test", "off"));
++        // G70 lanes (src-patches/08): the phone's lanes to the cluster, the lane test, the highlight value
++        turns.laneTest = "lanes".equals(mod.settingString("g70_icon_test", "off"));
++        turns.lanesOn = mod.settingBoolean("g70_lanes", true);
++        try {
++            turns.laneHi = Integer.parseInt(mod.settingString("g70_lane_highlight", "2"));
++        } catch (NumberFormatException e) {
++            turns.laneHi = 2;
++        }
++        if (turns.lanesOn) log("CarPlay: G70 lanes from the phone to the cluster (highlight status " + turns.laneHi + ")");
+         if (turns.testCodes != null) {
+             log("CarPlay: HUD icon test armed (" + turns.testCodes.length + " codes): start route guidance while parked");
+             app.context.registerReceiver(new android.content.BroadcastReceiver() {
+diff -ruN a/src/hmgapi/mods/wireless/dipo/G70Lanes.java b/src/hmgapi/mods/wireless/dipo/G70Lanes.java
+--- a/src/hmgapi/mods/wireless/dipo/G70Lanes.java	1970-01-01 00:00:00.000000000 +0000
++++ b/src/hmgapi/mods/wireless/dipo/G70Lanes.java	2026-11-04 00:20:54.432345803 +0000
+@@ -0,0 +1,135 @@
++package hmgapi.mods.wireless.dipo;
++
++import java.util.ArrayList;
++
++/**
++ * G70 (src-patches/08): the phone's LaneGuidanceInformation (iAP2 0x5204), read from the
++ * wireless CarPlay channel's bytes as they come in (Bridge.onCpIapIn), because the car's
++ * iAP2 server never passes it on: its RouteGuidanceUpdate component is declared without
++ * lane capacity, so 0x5204 doesn't become notification 122 (drive log 11/04: 45 of them,
++ * none reached a listener). Reads only; the bytes go on to the server unchanged.
++ *
++ * Parameters as seen (sizes only so far): 0 component (2 bytes), 1 lane guidance index
++ * (2), 3 a short value (4-6), and 2 once per lane, a group of 0 lane index (2), 1 status
++ * (1), 2 angles (2 each, signed degrees), 3 highlight angle (2, only on some lanes). Each
++ * one is logged in full to the research log, to check this reading on the next drive.
++ */
++final class G70Lanes {
++    static final int MSG = 0x5204;
++    static int logged;
++
++    private G70Lanes() {}
++
++    static int u16(byte[] b, int o) {
++        return ((b[o] & 0xff) << 8) | (b[o + 1] & 0xff);
++    }
++
++    /** iAP2 link packets, as Research.iap walks them; only control messages 0x5204 are read */
++    static void feed(byte[] b, int len) {
++        CpTurns t = Dipo.turns;
++        if (b == null || t == null || !t.lanesOn) return;
++        try {
++            if (len > b.length || len < 0) len = b.length;
++            int o = 0;
++            while (o + 9 <= len && (b[o] & 0xff) == 0xff && (b[o + 1] & 0xff) == 0x5a) {
++                int plen = u16(b, o + 2);
++                if (plen < 9) break;
++                int p = o + 9, end = Math.min(o + plen, len);
++                if (end - p >= 6 && (b[p] & 0xff) == 0x40 && (b[p + 1] & 0xff) == 0x40 && u16(b, p + 4) == MSG) {
++                    decode(b, p + 6, Math.min(p + u16(b, p + 2), end));
++                }
++                o += plen;
++            }
++        } catch (Throwable x) {
++            // reading only: CarPlay goes on
++        }
++    }
++
++    static void decode(byte[] b, int o, int end) {
++        int index = -1, component = -1;
++        String text = null;
++        final ArrayList<int[]> lanes = new ArrayList<int[]>();
++        StringBuilder raw = new StringBuilder();
++        while (o + 4 <= end) {
++            int plen = u16(b, o), pid = u16(b, o + 2);
++            if (plen < 4 || o + plen > end) break;
++            int d = o + 4, dl = plen - 4;
++            if (pid == 0 && dl >= 2) component = u16(b, d);
++            else if (pid == 1 && dl >= 2) index = u16(b, d);
++            else if (pid == 2) lanes.add(lane(b, d, d + dl));
++            else if (pid == 3) text = text(b, d, dl);
++            raw.append(' ').append(pid).append(':').append(hex(b, d, dl, 16));
++            o += plen;
++        }
++        StringBuilder s = new StringBuilder("lanes 0x5204 component ").append(component).append(" index ").append(index)
++                .append(" text ").append(text == null ? "-" : "\"" + text + "\"").append(" lanes ").append(lanes.size()).append(':');
++        for (int[] l : lanes) {
++            s.append(" [status ").append(l[0]).append(l[1] != 0 ? " hi " + l[2] : "").append(" angles");
++            for (int k = 3; k < l.length; k++) s.append(' ').append(l[k]);
++            s.append(']');
++        }
++        String line = s.toString();
++        Dipo.research(line + " | raw" + raw);
++        if (logged < 20 && CpTurns.debug) {
++            logged++;
++            Dipo.log("CarPlay dbg " + line);
++        }
++        if (index < 0) return;
++        final int i = index;
++        final int[][] a = lanes.toArray(new int[lanes.size()][]);
++        Dipo.post(new Runnable() {
++            @Override
++            public void run() {
++                Dipo.turns.g70Lanes(i, a);
++            }
++        });
++    }
++
++    /** one lane: {status, highlighted (0/1), highlight angle, angles...} */
++    static int[] lane(byte[] b, int o, int end) {
++        int status = 1, hi = 0, hiAngle = 0;
++        ArrayList<Integer> angles = new ArrayList<Integer>();
++        while (o + 4 <= end) {
++            int plen = u16(b, o), pid = u16(b, o + 2);
++            if (plen < 4 || o + plen > end) break;
++            int d = o + 4, dl = plen - 4;
++            if (pid == 1 && dl >= 1) status = dl >= 2 ? u16(b, d) : b[d] & 0xff;
++            else if (pid == 2) {
++                for (int k = 0; k + 1 < dl; k += 2) angles.add((int) (short) u16(b, d + k));
++            } else if (pid == 3 && dl >= 2) {
++                hi = 1;
++                hiAngle = (short) u16(b, d);
++            }
++            o += plen;
++        }
++        int[] r = new int[3 + angles.size()];
++        r[0] = status;
++        r[1] = hi;
++        r[2] = hiAngle;
++        for (int k = 0; k < angles.size(); k++) r[3 + k] = angles.get(k);
++        return r;
++    }
++
++    static String text(byte[] b, int d, int dl) {
++        int n = dl;
++        while (n > 0 && b[d + n - 1] == 0) n--;
++        for (int k = 0; k < n; k++) {
++            int c = b[d + k] & 0xff;
++            if (c < 0x20 && c != 0) return "hex:" + hex(b, d, dl, 16);
++        }
++        try {
++            return new String(b, d, n, "UTF-8");
++        } catch (Exception e) {
++            return "?";
++        }
++    }
++
++    static String hex(byte[] b, int d, int dl, int max) {
++        StringBuilder s = new StringBuilder();
++        for (int k = 0; k < dl && k < max; k++) {
++            String x = Integer.toHexString(b[d + k] & 0xff);
++            s.append(x.length() == 1 ? "0" : "").append(x);
++        }
++        return s.toString();
++    }
++}
+diff -ruN a/src/hmgapi/mods/wireless/dipo/Research.java b/src/hmgapi/mods/wireless/dipo/Research.java
+--- a/src/hmgapi/mods/wireless/dipo/Research.java	2026-11-04 00:18:48.343119476 +0000
++++ b/src/hmgapi/mods/wireless/dipo/Research.java	2026-11-04 00:20:19.031697192 +0000
+@@ -178,10 +178,66 @@
+                 MINUTE.clear();
+             }
+             if (s != null) write(TIME.format(new Date()) + " counts 60s: " + s + "\n");
++            String net = netMinute();
++            if (net != null) write(TIME.format(new Date()) + " net 60s:" + net + "\n");
+             if (on) h.postDelayed(this, 60000);
+         }
+     };
+ 
++    /** G70 (src-patches/08): each network interface's traffic and errors per minute (the Wi-Fi link to the phone) */
++    private static final HashMap<String, long[]> NET = new HashMap<String, long[]>();
++    static final String[] NET_STATS = { "rx_bytes", "tx_bytes", "rx_packets", "tx_packets", "rx_errors", "tx_errors", "rx_dropped", "tx_dropped" };
++
++    static String netMinute() {
++        File[] ifs = new File("/sys/class/net").listFiles();
++        if (ifs == null) return null;
++        java.util.Arrays.sort(ifs);
++        StringBuilder b = new StringBuilder();
++        for (File i : ifs) {
++            String n = i.getName();
++            if (n.equals("lo")) continue;
++            long[] now = new long[NET_STATS.length];
++            boolean any = false;
++            for (int k = 0; k < now.length; k++) {
++                now[k] = readLong(new File(i, "statistics/" + NET_STATS[k]));
++                any |= now[k] >= 0;
++            }
++            if (!any) continue;
++            long[] was = NET.put(n, now);
++            if (was == null) continue;
++            long[] d = new long[now.length];
++            boolean moved = false;
++            for (int k = 0; k < d.length; k++) {
++                d[k] = now[k] >= 0 && was[k] >= 0 ? now[k] - was[k] : 0;
++                moved |= d[k] != 0;
++            }
++            if (!moved) continue;
++            b.append(' ').append(n).append(" rx ").append(d[0] / 1024).append("KB/").append(d[2]).append("p tx ")
++                    .append(d[1] / 1024).append("KB/").append(d[3]).append("p err ").append(d[4]).append('/').append(d[5])
++                    .append(" drop ").append(d[6]).append('/').append(d[7]).append(';');
++        }
++        return b.length() == 0 ? null : b.toString();
++    }
++
++    static long readLong(File f) {
++        java.io.FileInputStream in = null;
++        try {
++            in = new java.io.FileInputStream(f);
++            byte[] buf = new byte[32];
++            int n = in.read(buf);
++            if (n <= 0) return -1;
++            return Long.parseLong(new String(buf, 0, n, "US-ASCII").trim());
++        } catch (Throwable x) {
++            return -1;
++        } finally {
++            try {
++                if (in != null) in.close();
++            } catch (Throwable x) {
++                // closed
++            }
++        }
++    }
++
+     private static String counts(Map<String, Integer> m, int max) {
+         StringBuilder b = new StringBuilder();
+         int k = 0;

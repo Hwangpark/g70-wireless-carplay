@@ -1,0 +1,132 @@
+diff -ruN a/src/hmgapi/mods/wireless/dipo/CpTurns.java b/src/hmgapi/mods/wireless/dipo/CpTurns.java
+--- a/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-04 03:49:15.711500303 +0000
++++ b/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-04 03:49:15.769871750 +0000
+@@ -457,6 +457,7 @@
+         stopIconTest("session ended");
+         reset();
+         hudBlank();
++        g70Idle("session ended");
+         source = null;
+         navName = null;
+         lastName = null;
+@@ -466,6 +467,7 @@
+     /** route guidance stopped (DiPO e/u.nS: the car's navigation took turn-by-turn back, or state 0) */
+     void stop() {
+         hudBlank();
++        g70Idle("guidance ended");
+         sentDest = null;
+         laneSent = null;
+         phoneLanes.clear();
+@@ -493,6 +495,7 @@
+      * nothing is kept over it (drive log 11/03: the HUD arrow stayed 30 s after it).
+      */
+     void dipoStopped() {
++        dipoStopAt = android.os.SystemClock.elapsedRealtime();
+         navName = null;
+         cancelStop();
+     }
+@@ -833,6 +836,30 @@
+         hudType = -1;
+     }
+ 
++    // ---- G70 guidance end (src-patches/10) ----
++
++    /** when DiPO last stopped route guidance (elapsedRealtime; 0: never) */
++    long dipoStopAt;
++    /** a turn went to the cluster/HUD since the last idle */
++    boolean g70Shown;
++
++    /**
++     * G70: guidance ended. hudBlank clears the HUD list and its distance, but the G70 HUD
++     * and cluster keep the last turn, remaining distance and arrival (owner, 11/04). The
++     * car's navigation, with no route, sends "no guidance": turn type 8 and "no value"
++     * markers (its log 11/04: update_tbt_info [8, 0, dir, 0.0, 0, 0, 0, 0, -1],
++     * update_tbt_sub_info [0.0, -3, 15, 255, 255, 3, 3, dir, 0, 255], 2C [15, 15, 65535] x3).
++     * The same, once per route.
++     */
++    void g70Idle(String why) {
++        if (!g70Shown) return;
++        g70Shown = false;
++        cluster.tbtInfo(8, 0, 0f, 0f, 0, 0, 0, 0, -1);
++        cluster.tbtSubInfo(0f, -3, 15, 255, 255, 3, 3, 0f, 0, 255);
++        cluster.tbtSubInfo2C(15, 15, 65535, 15, 15, 65535, 15, 15, 65535);
++        Dipo.log("CarPlay: G70 cluster/HUD set to no guidance (" + why + ")");
++    }
++
+     /** forget every component's state and maneuvers (DiPO e/u.nT) */
+     void reset() {
+         sentDest = null;
+@@ -882,6 +909,10 @@
+             return;
+         }
+         if (iconTest()) return;
++        if (dipoStopAt > 0 && android.os.SystemClock.elapsedRealtime() - dipoStopAt < 2500) {
++            dbgWhy("state " + u.state + " just after DiPO's stop: ignored");
++            return;
++        }
+         int[] list = u.list == null ? null : u.list.clone();
+         float dist = 0f;
+         if (u.nextStr != null && !u.nextStr.equals("")) {
+@@ -939,6 +970,7 @@
+                 + " list " + list.length + (gpmStyle ? " gpm" : ""));
+         if (gpmStyle) cluster.tbtInfo(icon, 65535, direction(icon), dist, 0, 0, unit, 32, 0);
+         else cluster.tbtInfo(icon, 0, 0f, dist, 0, 0, unit, 0, 0);
++        g70Shown = true;
+         sendHud(icon, id, u);
+         sendHudDist(dist, unit);
+         sendTrip(u);
+diff -ruN a/src/hmgapi/mods/wireless/dipo/Dipo.java b/src/hmgapi/mods/wireless/dipo/Dipo.java
+--- a/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-04 03:49:15.711166974 +0000
++++ b/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-04 03:49:26.747574296 +0000
+@@ -80,6 +80,10 @@
+         Research.line(m);
+     }
+ 
++    static boolean researchOn() {
++        return Research.on;
++    }
++
+     /** Wireless.appLoaded, in DiPO's process */
+     public static void start(ModContext m, LoadedApp a) {
+         mod = m;
+@@ -144,16 +148,10 @@
+         // G70: HUD icon test (off unless the owner picks codes in the mod's settings)
+         turns.testCodes = CpTurns.testCodes(mod.settingString("g70_icon_test", "off"));
+         // G70 lanes (src-patches/08): the phone's lanes to the cluster, the lane test, the highlight value
+-        turns.laneTest = "lanes".equals(mod.settingString("g70_icon_test", "off"));
+         turns.junctionTest = "junctions".equals(mod.settingString("g70_icon_test", "off"));
+-        // 2.2.3: off by default, the G70 cluster drew none of the lanes (lane test 11/04)
+-        turns.lanesOn = mod.settingBoolean("g70_lanes", false);
+-        try {
+-            turns.laneHi = Integer.parseInt(mod.settingString("g70_lane_highlight", "2"));
+-        } catch (NumberFormatException e) {
+-            turns.laneHi = 2;
+-        }
+-        if (turns.lanesOn) log("CarPlay: G70 lanes from the phone to the cluster (highlight status " + turns.laneHi + ")");
++        // 2.3.0: the phone's lanes aren't sent (the G70 cluster drew none in the 11/04 lane
++        // test, the HUD has no lane row); G70Lanes still reads them into the research log
++        turns.lanesOn = false;
+         if (turns.testCodes != null) {
+             log("CarPlay: HUD icon test armed (" + turns.testCodes.length + " codes): start route guidance while parked");
+             app.context.registerReceiver(new android.content.BroadcastReceiver() {
+diff -ruN a/src/hmgapi/mods/wireless/dipo/G70Lanes.java b/src/hmgapi/mods/wireless/dipo/G70Lanes.java
+--- a/src/hmgapi/mods/wireless/dipo/G70Lanes.java	2026-11-04 03:49:15.711691484 +0000
++++ b/src/hmgapi/mods/wireless/dipo/G70Lanes.java	2026-11-04 03:49:26.747124014 +0000
+@@ -27,7 +27,7 @@
+     /** iAP2 link packets, as Research.iap walks them; only control messages 0x5204 are read */
+     static void feed(byte[] b, int len) {
+         CpTurns t = Dipo.turns;
+-        if (b == null || t == null || !t.lanesOn) return;
++        if (b == null || t == null || !(t.lanesOn || Dipo.researchOn())) return;
+         try {
+             if (len > b.length || len < 0) len = b.length;
+             int o = 0;
+@@ -74,7 +74,7 @@
+             logged++;
+             Dipo.log("CarPlay dbg " + line);
+         }
+-        if (index < 0) return;
++        if (index < 0 || !Dipo.turns.lanesOn) return;
+         final int i = index;
+         final int[][] a = lanes.toArray(new int[lanes.size()][]);
+         Dipo.post(new Runnable() {

@@ -1,0 +1,144 @@
+diff -ruN a/src/hmgapi/mods/wireless/dipo/CpTurns.java b/src/hmgapi/mods/wireless/dipo/CpTurns.java
+--- a/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-04 23:51:46.307111396 +0000
++++ b/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-04 23:52:16.410692810 +0000
+@@ -916,9 +916,9 @@
+             case 2: case 21: return new float[] { 13, 2065, 90f, 300 };     // right (11/05 08:23, a city right turn)
+             case 1: case 20: return new float[] { 13, 2065, 270f, 300 };    // left (11/05 08:21, a city left turn)
+             case 48: return new float[] { 13, 2081, 112.5f, 300 };          // sharp right
+-            case 47: return new float[] { 13, 17414, 247.5f, 300 };         // sharp left
+-            case 50: return new float[] { 13, 3, 22.5f, 300 };              // slight right
+-            case 49: return new float[] { 13, 16385, 337.5f, 300 };         // slight left
++            case 47: return new float[] { 13, 1041, 247.5f, 300 };          // sharp left (mirror of sharp right)
++            case 50: return new float[] { 13, 3, 22.5f, 400 };              // slight right (the car's: 400 m)
++            case 49: return new float[] { 13, 16385, 337.5f, 400 };         // slight left
+             case 4: case 18: case 26: return new float[] { 31, 0, 270f, 300 };   // U-turn
+             case 14: case 53: return new float[] { 13, 3, 22.5f, 600 };     // keep / change highway right
+             case 13: case 52: return new float[] { 13, 16385, 337.5f, 600 };   // keep / change highway left
+@@ -928,6 +928,58 @@
+         }
+     }
+ 
++    /** a named point TMAP sends as straight on: an IC or JC passed, a rest area (a tollgate keeps its own icon) */
++    static boolean passThrough(Maneuver x) {
++        if (x == null || (x.type != 3 && x.type != 5) || tollgate(x)) return false;
++        String n = x.afterRoad != null && x.afterRoad.length() > 0 ? x.afterRoad : x.description;
++        if (n == null) return false;
++        n = n.trim();
++        return n.endsWith("IC") || n.endsWith("JC") || has(n, "\uD734\uAC8C\uC18C", "\uC878\uC74C\uC27C\uD130");   // rest area, drowsy-driver shelter
++    }
++
++    /** a copy of a maneuver as a highway exit (type 22/23), for its junction picture */
++    static Maneuver asExit(Maneuver x, int type) {
++        Maneuver e = new Maneuver(x.index, 0, null);
++        e.index = x.index;
++        e.type = type;
++        e.description = x.description;
++        e.afterRoad = x.afterRoad;
++        e.distance = x.distance;
++        return e;
++    }
++
++    static int[] g70AddArm(int[] arms, int a) {
++        for (int x : arms) if (x == a) return arms;
++        int[] r = java.util.Arrays.copyOf(arms, arms.length + 1);
++        r[arms.length] = a;
++        return r;
++    }
++
++    /**
++     * The junction's real shape when the phone sends it (Apple Maps: the other roads' angles,
++     * item 10, and the exit angle, item 11; right positive): side street bits as the car's
++     * navigation sets them, 16 sectors of 22.5 degrees clockwise from straight on, bit k for
++     * k x 22.5 on the right, (k + 1) x 22.5 on the left, the road behind left out (decoded
++     * from its 15 junctions, 11/04-05). TMAP sends no angles: the usual shape is kept.
++     */
++    static float[] g70Shape(Maneuver x, float[] j) {
++        if (j == null || x == null || j[0] != 13 || x.g70Arms.length == 0 || x.exit == 0) return j;
++        int mask = 0;
++        for (int a : x.g70Arms) mask |= armBit(a);
++        mask |= armBit(x.exit);
++        float dir = Math.round(((x.exit % 360) + 360) % 360 / 22.5f) * 22.5f;
++        if (dir >= 360f) dir -= 360f;
++        return mask == 0 ? j : new float[] { 13, mask, dir, j[3] };
++    }
++
++    static int armBit(int angle) {
++        int a = ((angle % 360) + 360) % 360;
++        int k = Math.round(a / 22.5f) % 16;
++        if (k == 8) return 0;                // the road we come from
++        if (k > 8) k -= 1;
++        return 1 << k;
++    }
++
+     /** the distance bar: 90 when the picture starts, down to 10 */
+     static int stockBar(int m, int start) {
+         if (start <= 0) return 10;
+@@ -946,7 +998,26 @@
+         Maneuver y = ahead.length > 0 && m != null ? m.get(ahead[0]) : null;
+         Maneuver z = ahead.length > 1 && m != null ? m.get(ahead[1]) : null;
+         int meters = u.distNext;
+-        float[] j = stockJunction(x);
++        // a named point TMAP sends as straight on (an IC, a JC, a rest area): the car's navigation
++        // shows the next real maneuver instead (11/05: 1.5 km "Set IC" was 164 for 9.8 km)
++        if (passThrough(x) && y != null && y.distance > 0 && meters >= 0) {
++            Maneuver w = y;
++            meters += y.distance;
++            x = w;
++            y = z;
++            z = ahead.length > 2 && m != null ? m.get(ahead[2]) : null;
++            icon = stockIcon(x, iconOf(x, u.state));
++            if (icon == 0) return;
++            unit = meters >= 1000 ? Cluster.UNIT_KM : Cluster.UNIT_M;
++            dist = meters >= 1000 ? Math.round(meters / 100f) / 10f : meters;
++        }
++        // a slight turn onto a ramp, then the exit of the same name: one highway exit, as the car's navigation shows it
++        if ((x.type == 49 || x.type == 50) && y != null && (y.type == 22 || y.type == 23) && y.distance > 0 && y.distance <= 600
++                && x.afterRoad != null && x.afterRoad.length() > 0 && x.afterRoad.equals(y.afterRoad)) {
++            icon = y.type == 23 ? 164 : 82;
++            x = asExit(x, y.type);
++        }
++        float[] j = g70Shape(x, stockJunction(x));
+         if (x.index != jctIndex) jctIndex = -1;
+         if (j != null && meters > 0 && meters <= (int) j[3]) {
+             if (jctIndex != x.index) {
+@@ -955,15 +1026,18 @@
+                 Dipo.log("CarPlay: G70 junction picture " + (int) j[0] + " (side " + (int) j[1] + ", " + j[2] + " deg) for maneuver "
+                         + x.index + " (type " + x.type + ") at " + meters + " m");
+             }
+-            cluster.tbtInfo((int) j[0], (int) j[1], j[2], meters, 0, 0, Cluster.UNIT_M, stockBar(meters, jctStart), 0);
+-            stockNear(x, meters, y, z);
++            cluster.tbtInfo((int) j[0], (int) j[1], j[2], meters / 10 * 10, 0, 0, Cluster.UNIT_M, stockBar(meters, jctStart), 0);
++            stockNear(x, meters / 10 * 10, y, z);
+             return;
+         }
+-        if (icon == 178 && meters > 0 && meters <= 500) {
+-            cluster.tbtInfo(178, 0, 1912.5f, meters, 0, 15, Cluster.UNIT_M, Math.max(10, Math.min(50, (int) Math.ceil(meters / 100.0) * 10)), 0);
+-            stockNear(x, meters, y, z);
++        if (icon == 178 && meters > 0 && meters <= 1000) {
++            // tollgate: the bar from 1 km (11/05: 1.1 km 90 ... 210 m 10; a ramp tollgate 500 m 50)
++            cluster.tbtInfo(178, 0, 1912.5f, meters / 10 * 10, 0, 15, Cluster.UNIT_M, stockBar(meters, 1000), 0);
++            stockNear(x, meters / 10 * 10, y, z);
+             return;
+         }
++        // far: under 1 km in hundreds of metres, as the car's navigation (900, 800 ... 400 m)
++        if (unit == Cluster.UNIT_M && dist >= 100f) dist = (int) (dist / 100f) * 100f;
+         cluster.tbtInfo(icon, 0, 1912.5f, dist, 0, 15, unit, 0, -1);
+         stockName("");
+         int i2 = y == null || y.distance <= 0 ? 0 : stockIcon(y, iconOf(y, u.state));
+@@ -1734,6 +1808,8 @@
+         int index, type, distance, distUnits, side, junction, exit, linkedLane;
+         String description, afterRoad, distStr;
+         int[] angles;
++        /** G70 (src-patches/12): every junction road angle (item 10 comes once per road; angles keeps the last) */
++        int[] g70Arms = new int[0];
+ 
+         Maneuver(int index, int id, Iap2NotiMsg msg) {
+             if (msg == null) return;
+@@ -1771,6 +1847,7 @@
+                             if (v != null) {
+                                 angles = new int[n];
+                                 for (int j = 0; j < n; j++) angles[j] = v[j];
++                                for (int j = 0; j < n; j++) g70Arms = g70AddArm(g70Arms, v[j]);
+                             } else {
+                                 angles = null;
+                             }

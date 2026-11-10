@@ -1,0 +1,102 @@
+diff -ruN a/src/hmgapi/mods/wireless/Wireless.java b/src/hmgapi/mods/wireless/Wireless.java
+--- a/src/hmgapi/mods/wireless/Wireless.java	2026-11-04 01:42:02.106097457 +0000
++++ b/src/hmgapi/mods/wireless/Wireless.java	2026-11-04 01:42:19.951174605 +0000
+@@ -100,7 +100,7 @@
+         }
+         // G70 (src-patches/08): while the phone guides and its lanes go to the cluster, the
+         // car navigation's own lanes (it sends them even without a route) are held back
+-        final boolean lanes = tbt && mod.settingBoolean("g70_lanes", true);
++        final boolean lanes = tbt && mod.settingBoolean("g70_lanes", false);
+         if (research || lanes) {
+             mod.hook(null, "framework.navigation_cluster.update_lane_info", new MethodHook() {
+                 @Override
+diff -ruN a/src/hmgapi/mods/wireless/dipo/CpTurns.java b/src/hmgapi/mods/wireless/dipo/CpTurns.java
+--- a/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-04 01:42:02.105518580 +0000
++++ b/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-04 01:42:19.946325835 +0000
+@@ -505,6 +505,11 @@
+     /** the codes for a g70_icon_test choice; null when off */
+     static int[] testCodes(String choice) {
+         if (choice == null) return null;
++        if (choice.equals("junctions")) {
++            int[] r = new int[JUNCTION_TEST.length];
++            for (int k = 0; k < r.length; k++) r[k] = k + 1;
++            return r;
++        }
+         if (choice.equals("lanes")) {
+             int[] r = new int[LANE_TEST.length];
+             for (int k = 0; k < r.length; k++) r[k] = k + 1;
+@@ -560,6 +565,16 @@
+     void stepTest() {
+         if (testCodes == null || testAt < 0 || testAt >= testCodes.length) return;
+         int code = testCodes[testAt++];
++        if (junctionTest) {
++            stepJunctionTest(code);
++            if (testAt < testCodes.length) {
++                scheduleTest(3000L);
++            } else {
++                Dipo.log("CarPlay: HUD junction test done, route guidance shows again with the next update");
++                hudType = -1;
++            }
++            return;
++        }
+         if (laneTest) {
+             stepLaneTest(code);
+             if (testAt < testCodes.length) {
+@@ -607,6 +622,43 @@
+     int laneHi = 2;
+     /** setting g70_icon_test = lanes: the test sends lane frames instead of icons */
+     boolean laneTest;
++    /** setting g70_icon_test = junctions: the HUD junction test (src-patches/09) */
++    boolean junctionTest;
++
++    /**
++     * G70 HUD junction test (src-patches/09): the stock HUD draws the junction (grey roads
++     * under the arrow) and a distance bar; ours shows a bare arrow (DiPO style sends 0 for
++     * both). Each step: {icon, side streets, combined side streets, bar}, the step as the
++     * distance. Side streets one bit at a time, to see which bit draws which road.
++     */
++    static final int[][] JUNCTION_TEST = {
++        { 67, 0, 0, 0 },          // 1: as now (DiPO style)
++        { 67, 65535, 0, 32 },     // 2: as GPM style
++        { 67, 1, 0, 16 }, { 67, 2, 0, 16 }, { 67, 4, 0, 16 }, { 67, 8, 0, 16 },              // 3-6
++        { 67, 16, 0, 16 }, { 67, 32, 0, 16 }, { 67, 64, 0, 16 }, { 67, 128, 0, 16 },         // 7-10
++        { 67, 256, 0, 16 }, { 67, 512, 0, 16 }, { 67, 1024, 0, 16 }, { 67, 2048, 0, 16 },    // 11-14
++        { 67, 4096, 0, 16 }, { 67, 8192, 0, 16 }, { 67, 16384, 0, 16 }, { 67, 32768, 0, 16 }, // 15-18
++        { 67, 0, 65535, 16 },     // 19: combined side streets only
++        { 65, 65535, 0, 16 },     // 20: straight, all side streets
++        { 70, 65535, 0, 16 },     // 21: left, all side streets
++        { 67, 0, 0, 8 },          // 22: bar 8
++        { 67, 0, 0, 24 },         // 23: bar 24
++        { 67, 0, 0, 32 },         // 24: bar 32
++    };
++
++    void stepJunctionTest(int step) {
++        int[] j = JUNCTION_TEST[step - 1];
++        Dipo.log("CarPlay: HUD junction test " + step + "/" + JUNCTION_TEST.length + ": icon " + j[0] + " side " + j[1]
++                + " combined " + j[2] + " bar " + j[3]);
++        cluster.crossroadName("JCT " + step);
++        cluster.tbtInfo(j[0], j[1], 0f, step, 0, j[2], Cluster.UNIT_M, j[3], 0);
++        byte[] h = new byte[5];
++        h[0] = (byte) 0xF2;
++        h[1] = 1;
++        h[2] = (byte) j[0];
++        cluster.turnListNew(h);
++        cluster.tbtSubInfo2C(Cluster.UNIT_M, 0, step, 0, 0, 0, 0, 0, 0);
++    }
+     /** lane guidance index -> lanes, each {iAP2 status, highlighted (0/1), highlight angle, angles...} */
+     final HashMap<Integer, int[][]> phoneLanes = new HashMap<Integer, int[][]>();
+     /** the lane frame last sent as hex ("": cleared), null: none since the route began */
+diff -ruN a/src/hmgapi/mods/wireless/dipo/Dipo.java b/src/hmgapi/mods/wireless/dipo/Dipo.java
+--- a/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-04 01:42:02.105072924 +0000
++++ b/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-04 01:42:19.950953811 +0000
+@@ -145,7 +145,9 @@
+         turns.testCodes = CpTurns.testCodes(mod.settingString("g70_icon_test", "off"));
+         // G70 lanes (src-patches/08): the phone's lanes to the cluster, the lane test, the highlight value
+         turns.laneTest = "lanes".equals(mod.settingString("g70_icon_test", "off"));
+-        turns.lanesOn = mod.settingBoolean("g70_lanes", true);
++        turns.junctionTest = "junctions".equals(mod.settingString("g70_icon_test", "off"));
++        // 2.2.3: off by default, the G70 cluster drew none of the lanes (lane test 11/04)
++        turns.lanesOn = mod.settingBoolean("g70_lanes", false);
+         try {
+             turns.laneHi = Integer.parseInt(mod.settingString("g70_lane_highlight", "2"));
+         } catch (NumberFormatException e) {

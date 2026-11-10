@@ -1,0 +1,831 @@
+diff -ruN a/src/hmgapi/mods/wireless/G70Research.java b/src/hmgapi/mods/wireless/G70Research.java
+--- a/src/hmgapi/mods/wireless/G70Research.java	1970-01-01 00:00:00.000000000 +0000
++++ b/src/hmgapi/mods/wireless/G70Research.java	2026-11-03 13:24:33.786742937 +0000
+@@ -0,0 +1,235 @@
++package hmgapi.mods.wireless;
++
++import android.content.Context;
++import android.os.Handler;
++import android.os.HandlerThread;
++
++import java.io.File;
++import java.io.FileOutputStream;
++import java.lang.reflect.Field;
++import java.lang.reflect.Modifier;
++import java.text.SimpleDateFormat;
++import java.util.Date;
++import java.util.HashMap;
++import java.util.HashSet;
++import java.util.Locale;
++
++import hmgapi.hook.ModContext;
++import hmgapi.hook.Points;
++
++/**
++ * G70 research log (setting g70_debug, on by default from 2.2.1) outside DiPO (DiPO's
++ * part has its own, dipo.Research):
++ *   - the car navigation app (com.mnsoft.navi): every NavigationCluster call it makes
++ *     (turn info, lanes, turn lists, crossroad and destination names) with its arguments,
++ *     when they change apart from distances (at most one line per call kind per 2 s), to
++ *     g70-navi.log (3 MB, then .1) in its cache folder: how the car's own guidance drives
++ *     the cluster and HUD, icon codes and lane frames included
++ *   - the iAP2 server: the feature switches and counts it identifies the head unit with
++ *     (Iap2InitInformationMsg's numbers and the persist.sys.iap2.* properties, no names or
++ *     serials) and the broadcasts it gets, to HMG-API's log
++ * Reads only: a call goes on (or is skipped by the turn-by-turn hook) as before.
++ */
++final class G70Research {
++    static volatile boolean on;
++    static ModContext mod;
++    private static Handler h;
++    private static File file, old;
++    private static FileOutputStream out;
++    private static long size;
++    private static final long MAX = 3L << 20;
++    private static final SimpleDateFormat TIME = new SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.ROOT);
++    private static final HashMap<String, String> LAST = new HashMap<String, String>();
++    private static final HashMap<String, Long> LAST_TIME = new HashMap<String, Long>();
++    private static final HashMap<String, Integer> CALLS = new HashMap<String, Integer>();
++    /** calls that are mostly distance and time: the first 3, then one in 60 */
++    private static final HashSet<String> COUNTDOWN = new HashSet<String>(java.util.Arrays.asList(
++            "update_remain_dis", "update_tbt_sub_info", "update_tbt_sub_info_b", "update_tbt_sub_info_2c"));
++    private static final HashSet<String> ACTIONS = new HashSet<String>();
++    private static String lastInit;
++
++    private G70Research() {}
++
++    /** the navigation app's log: on opens it, off deletes what an earlier start left; returns on */
++    static boolean navi(ModContext m, Context c, boolean enable) {
++        mod = m;
++        try {
++            File dir = c.getCacheDir();
++            file = new File(dir, "g70-navi.log");
++            old = new File(dir, "g70-navi.log.1");
++            if (!enable) {
++                if (file.delete() | old.delete()) m.log("G70 research: navigation log off, files deleted");
++                return false;
++            }
++            HandlerThread t = new HandlerThread("hmgapi-g70-navi");
++            t.start();
++            h = new Handler(t.getLooper());
++            on = true;
++            line("==== navigation app started, research log on (" + file + ")");
++            m.log("G70 research: navigation app's cluster calls go to " + file);
++            return true;
++        } catch (Throwable x) {
++            m.error("G70 research: navigation log", x);
++            return false;
++        }
++    }
++
++    static void line(final String s) {
++        if (!on) return;
++        final long now = System.currentTimeMillis();
++        h.post(new Runnable() {
++            @Override
++            public void run() {
++                write(TIME.format(new Date(now)) + " " + s + "\n");
++            }
++        });
++    }
++
++    private static void write(String s) {
++        try {
++            if (out == null) {
++                out = new FileOutputStream(file, true);
++                size = file.length();
++            }
++            byte[] b = s.getBytes("UTF-8");
++            out.write(b);
++            out.flush();
++            size += b.length;
++            if (size > MAX) {
++                out.close();
++                out = null;
++                old.delete();
++                file.renameTo(old);
++            }
++        } catch (Throwable x) {
++            on = false;
++        }
++    }
++
++    /** a NavigationCluster call in the navigation app (before it runs) */
++    static void naviCall(String m, Object[] args, boolean skipped) {
++        if (!on) return;
++        try {
++            int n;
++            synchronized (CALLS) {
++                Integer c = CALLS.get(m);
++                n = c == null ? 1 : c + 1;
++                CALLS.put(m, n);
++            }
++            if (n == 1) mod.log("G70 research: car navigation calls " + m + " (first)");
++            boolean countdown = COUNTDOWN.contains(m);
++            if (countdown) {
++                if (n > 3 && n % 60 != 0) return;
++            } else {
++                String key = describe(args, true, 0);
++                long now = System.currentTimeMillis();
++                synchronized (LAST) {
++                    if (key.equals(LAST.get(m))) return;
++                    Long t = LAST_TIME.get(m);
++                    if (t != null && now - t < 2000) return;   // the change shows again on a later call
++                    LAST.put(m, key);
++                    LAST_TIME.put(m, now);
++                }
++            }
++            line("navi " + m + " #" + n + (skipped ? " (skipped, phone guides)" : "") + ": " + describe(args, false, 0));
++        } catch (Throwable x) {
++            // reading only
++        }
++    }
++
++    /** arguments as text; key: floats and fields about distance or time left out (what's compared) */
++    static String describe(Object o, boolean key, int depth) {
++        if (o == null) return "null";
++        if (o instanceof Float || o instanceof Double) return key ? "~" : String.valueOf(o);
++        if (o instanceof Number || o instanceof Boolean || o instanceof Character) return String.valueOf(o);
++        if (o instanceof String) return "\"" + o + "\"";
++        if (o instanceof byte[]) {
++            byte[] b = (byte[]) o;
++            StringBuilder s = new StringBuilder("hex(").append(b.length).append("):");
++            for (int k = 0; k < b.length && k < 160; k++) {
++                String x = Integer.toHexString(b[k] & 0xff);
++                s.append(x.length() == 1 ? "0" : "").append(x);
++            }
++            return s.toString();
++        }
++        if (o instanceof int[]) return java.util.Arrays.toString((int[]) o);
++        if (o instanceof long[]) return java.util.Arrays.toString((long[]) o);
++        if (o instanceof float[]) return key ? "~" : java.util.Arrays.toString((float[]) o);
++        if (o instanceof Object[]) {
++            Object[] a = (Object[]) o;
++            StringBuilder s = new StringBuilder("[");
++            for (int k = 0; k < a.length && k < 16; k++) s.append(k == 0 ? "" : ", ").append(describe(a[k], key, depth + 1));
++            return s.append(a.length > 16 ? ", ..]" : "]").toString();
++        }
++        if (depth > 2) return o.getClass().getSimpleName();
++        StringBuilder s = new StringBuilder(o.getClass().getSimpleName()).append('{');
++        int k = 0;
++        for (Class<?> c = o.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
++            for (Field f : c.getDeclaredFields()) {
++                if (Modifier.isStatic(f.getModifiers())) continue;
++                String n = f.getName().toLowerCase(Locale.ROOT);
++                if (key && (n.contains("dist") || n.contains("time") || n.contains("remain"))) continue;
++                try {
++                    f.setAccessible(true);
++                    s.append(k++ == 0 ? "" : ", ").append(f.getName()).append('=').append(describe(f.get(o), key, depth + 1));
++                } catch (Throwable x) {
++                    // skip it
++                }
++            }
++        }
++        return s.append('}').toString();
++    }
++
++    /**
++     * The iAP2 server, after it checks its features: Iap2InitInformationMsg's numbers (what
++     * the head unit tells the iPhone it supports: masks, counts, the route guidance flag
++     * HMG-API sets) and the persist.sys.iap2.* switches they come from, when they change.
++     */
++    static void initInfo(ModContext m, ClassLoader cl) {
++        try {
++            Class<?> c = Points.cls(cl, "iap2.init_info");
++            if (c == null) return;
++            StringBuilder nums = new StringBuilder(), props = new StringBuilder();
++            Class<?> sp = Class.forName("android.os.SystemProperties");
++            java.lang.reflect.Method get = sp.getMethod("get", String.class);
++            for (Field f : c.getDeclaredFields()) {
++                if (!Modifier.isStatic(f.getModifiers())) continue;
++                f.setAccessible(true);
++                Class<?> t = f.getType();
++                if (t == int.class || t == boolean.class || t == long.class) {
++                    if (f.getName().equals("TRUE") || f.getName().equals("FALSE")) continue;
++                    nums.append(' ').append(f.getName()).append('=').append(f.get(null));
++                } else if (t == String.class && f.getName().startsWith("PROPERTY_") && !f.getName().contains("ADDRESS")) {
++                    Object k = f.get(null);
++                    if (!(k instanceof String)) continue;
++                    String v = (String) get.invoke(null, k);
++                    props.append(' ').append(k).append('=').append(v == null || v.isEmpty() ? "-" : v);
++                }
++            }
++            String all = nums + " |" + props;
++            if (all.equals(lastInit)) return;
++            lastInit = all;
++            chunks(m, "iAP2 server features", nums.toString());
++            chunks(m, "iAP2 server switches", props.toString());
++        } catch (Throwable x) {
++            m.error("G70 research: iAP2 features", x);
++        }
++    }
++
++    private static void chunks(ModContext m, String what, String s) {
++        int parts = (s.length() + 899) / 900, k = 0;
++        for (int o = 0; o < s.length(); o += 900) {
++            k++;
++            m.log("G70 research: " + what + " (" + k + "/" + parts + "):" + s.substring(o, Math.min(s.length(), o + 900)));
++        }
++    }
++
++    /** the iAP2 server's broadcasts, the first of each action */
++    static void action(ModContext m, String a) {
++        if (a == null) return;
++        synchronized (ACTIONS) {
++            if (!ACTIONS.add(a)) return;
++        }
++        m.log("G70 research: iAP2 server got broadcast " + a + " (first)");
++    }
++}
+diff -ruN a/src/hmgapi/mods/wireless/Wireless.java b/src/hmgapi/mods/wireless/Wireless.java
+--- a/src/hmgapi/mods/wireless/Wireless.java	2026-11-03 13:20:16.144226012 +0000
++++ b/src/hmgapi/mods/wireless/Wireless.java	2026-11-03 13:24:45.500975324 +0000
+@@ -84,15 +84,29 @@
+      * data still go through (phones carry none of that). Framework calls only: no app names.
+      */
+     private void navigation(final ModContext mod, final LoadedApp app) {
+-        if (!mod.settingBoolean("tbt", true)) return;
+-        MethodHook skip = new MethodHook() {
+-            @Override
+-            protected void beforeHookedMethod(Param p) {
+-                if (Car.phoneGuiding(app.context)) p.setResult(null);
+-            }
+-        };
+-        for (String m : NAVI_TBT) mod.hook(null, "framework.navigation_cluster." + m, skip);
+-        mod.log("navigation: turn-by-turn yields to the phone in " + app.processName);
++        final boolean tbt = mod.settingBoolean("tbt", true);
++        // G70 research log (src-patches/07): the car navigation's own cluster calls, to a file
++        final boolean research = G70Research.navi(mod, app.context, mod.settingBoolean("g70_debug", true));
++        if (!tbt && !research) return;
++        for (final String m : NAVI_TBT) {
++            mod.hook(null, "framework.navigation_cluster." + m, new MethodHook() {
++                @Override
++                protected void beforeHookedMethod(Param p) {
++                    boolean skip = tbt && Car.phoneGuiding(app.context);
++                    if (research) G70Research.naviCall(m, p.args, skip);
++                    if (skip) p.setResult(null);
++                }
++            });
++        }
++        if (research) {
++            mod.hook(null, "framework.navigation_cluster.update_lane_info", new MethodHook() {
++                @Override
++                protected void beforeHookedMethod(Param p) {
++                    G70Research.naviCall("update_lane_info", p.args, false);
++                }
++            });
++        }
++        if (tbt) mod.log("navigation: turn-by-turn yields to the phone in " + app.processName);
+     }
+ 
+     /**
+@@ -105,15 +119,20 @@
+      */
+     private void iap2(final ModContext mod, LoadedApp app) {
+         final ClassLoader cl = app.classLoader;
+-        if (mod.settingBoolean("tbt", true)) {
++        final boolean tbt = mod.settingBoolean("tbt", true);
++        final boolean research = mod.settingBoolean("g70_debug", true);   // G70 research log (src-patches/07)
++        if (tbt || research) {
+             mod.hook(cl, "iap2.init_info.check_supports_features", new MethodHook() {
+                 @Override
+                 protected void afterHookedMethod(Param p) {
+-                    try {
+-                        Points.field(cl, "iap2.init_info.route_guidance").setInt(null, 1);
+-                    } catch (Exception e) {
+-                        mod.error("route guidance flag", e);
++                    if (tbt) {
++                        try {
++                            Points.field(cl, "iap2.init_info.route_guidance").setInt(null, 1);
++                        } catch (Exception e) {
++                            mod.error("route guidance flag", e);
++                        }
+                     }
++                    if (research) G70Research.initInfo(mod, cl);
+                 }
+             });
+         }
+@@ -144,6 +163,7 @@
+             protected void beforeHookedMethod(Param p) {
+                 Intent i = (Intent) p.args[1];
+                 String a = i == null ? null : i.getAction();
++                if (research) G70Research.action(mod, a);
+                 if (!USB_CARPLAY.equals(a) && !USB_DIGITAL_AUDIO.equals(a)) return;
+                 try {
+                     stopBt(mod, cl, Points.get(cl, "iap2.service_receiver.service", p.thisObject), "usb attach");
+diff -ruN a/src/hmgapi/mods/wireless/dipo/Bridge.java b/src/hmgapi/mods/wireless/dipo/Bridge.java
+--- a/src/hmgapi/mods/wireless/dipo/Bridge.java	2026-11-03 13:20:16.144362748 +0000
++++ b/src/hmgapi/mods/wireless/dipo/Bridge.java	2026-11-03 13:23:32.633959330 +0000
+@@ -237,6 +237,7 @@
+             if (cp != null) sCp = cp;
+             if (data == null || len <= 0 || sUsb) return;
+             if (len >= data.length) len = data.length;
++            Research.iap("cp<", data, len);
+             byte[] b = new byte[len];
+             System.arraycopy(data, 0, b, 0, len);
+             if (!sCpClient) startCpClient("iAP2 data from CarPlay channel");
+@@ -257,6 +258,7 @@
+     static void onCpSessionFinalized(int type) {
+         try {
+             log("CarPlay session finalized type=" + type + " cpClient=" + sCpClient);
++            Research.totals("CarPlay session finalized");
+             boolean client = sCpClient, wireless = sCpWireless;
+             sCpWireless = false;
+             sCpClient = false;
+@@ -351,6 +353,7 @@
+     static void writeCp(byte[] data) {
+         final Object cp = sCp;
+         if (cp == null || data == null || data.length == 0 || !sCpClient) return;
++        Research.iap("cp>", data, data.length);
+         final byte[] b = data.clone();
+         cpTx().post(new Runnable() {
+             @Override
+@@ -417,6 +420,7 @@
+                 System.arraycopy(data, 0, b, 0, len);
+                 data = b;
+             }
++            Research.iap("bt<", data, len);
+             s.Iap2SvcTransportReadDone(data, len);
+         } catch (Throwable t) {
+             error("onSppData", t);
+@@ -429,6 +433,7 @@
+             String addr = sAddr;
+             HfDeviceBTCMManager m = sBtcm;
+             if (addr == null || m == null || data == null || data.length == 0 || !sSession) return;
++            Research.iap("bt>", data, data.length);
+             if (!m.IbtcmSppOutPutStreamWrite(addr, data)) log("SPP write failed, " + data.length + " bytes");
+         } catch (Throwable t) {
+             error("writeSpp", t);
+diff -ruN a/src/hmgapi/mods/wireless/dipo/Dipo.java b/src/hmgapi/mods/wireless/dipo/Dipo.java
+--- a/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-03 13:20:16.165079869 +0000
++++ b/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-03 13:23:32.632970848 +0000
+@@ -81,6 +81,8 @@
+         app = a;
+         tbt = m.settingBoolean("tbt", true);
+         bridge = m.settingBoolean("bridge", true);
++        // G70 research log (src-patches/07): on by default, off deletes its files
++        Research.init(a.context, m.settingBoolean("g70_debug", true));
+         // the CarPlay libraries, patched in memory once DiPO loads them (files stay stock)
+         if (bridge) m.nativePatch(a, "libCarPlayCore.so");   // AirPlay sessions over Wi-Fi
+         if (m.settingBoolean("audio", true)) {
+@@ -131,7 +133,7 @@
+         });
+         rg = new RgListener();
+         // G70: tbtInfo as DiPO sends it (default) or as Hyundai's Android Auto manager does
+-        CpTurns.debug = mod.settingBoolean("g70_debug", false);
++        CpTurns.debug = mod.settingBoolean("g70_debug", true);
+         turns.gpmStyle = "gpm".equals(mod.settingString("g70_tbt_style", "dipo"));
+         if (turns.gpmStyle) log("CarPlay: G70 turn style gpm (side street 65535, direction, bar 32)");
+         // G70: HUD icon test (off unless the owner picks codes in the mod's settings)
+@@ -235,6 +237,7 @@
+ 
+         @Override
+         public void notify(final int what, int a1, int a2, final Iap2NotiMsg msg) {
++            Research.noti("rg", what, a1, a2, msg);
+             synchronized (SEEN) {
+                 if (SEEN.add(what) && CpTurns.debug) log("CarPlay dbg: route guidance listener got noti " + what + " (msg " + (msg != null) + ")");
+             }
+@@ -320,6 +323,7 @@
+         mod.hook(cl, "dipo.iap2_listener.notify", new MethodHook() {
+             @Override
+             protected void beforeHookedMethod(Param p) {
++                if (Research.on) Research.noti("dipo", (Integer) p.args[0], (Integer) p.args[1], (Integer) p.args[2], p.args[3]);
+                 if (Bridge.dipoDropNoti((Integer) p.args[0])) p.setResult(null);
+             }
+         });
+diff -ruN a/src/hmgapi/mods/wireless/dipo/Research.java b/src/hmgapi/mods/wireless/dipo/Research.java
+--- a/src/hmgapi/mods/wireless/dipo/Research.java	1970-01-01 00:00:00.000000000 +0000
++++ b/src/hmgapi/mods/wireless/dipo/Research.java	2026-11-03 13:27:29.792711706 +0000
+@@ -0,0 +1,432 @@
++package hmgapi.mods.wireless.dipo;
++
++import android.content.Context;
++import android.os.Handler;
++import android.os.HandlerThread;
++
++import com.tcc.iap2.Iap2NotiMsg;
++
++import java.io.File;
++import java.io.FileOutputStream;
++import java.text.SimpleDateFormat;
++import java.util.Date;
++import java.util.HashMap;
++import java.util.Locale;
++import java.util.Map;
++import java.util.TreeMap;
++
++/**
++ * G70 research log (setting g70_debug, on by default from 2.2.1), in DiPO's process.
++ * What it records, for finding what else the phone and the car can do:
++ *   - every iAP2 message between the iPhone and the head unit's iAP2 server, over the
++ *     Bluetooth bridge (bt) and the wireless CarPlay channel (cp), "<" from the phone and
++ *     ">" to it: message id and name, its parameter ids and sizes (no values), counts per
++ *     minute; the head unit's IdentificationInformation in full (the messages it says it
++ *     sends and takes, the components it declares, small numbers only)
++ *   - every notification the iAP2 server gives DiPO's listener and HMG-API's route
++ *     guidance listener, with its items and values (texts too: destinations, road names,
++ *     now playing titles; phone numbers, Bluetooth addresses and long ids masked)
++ * The full record goes to g70-research.log (3 MB, then .1) in DiPO's cache folder, which
++ * the G70 log kit copies to USB; the first sighting of each kind, and the totals when a
++ * CarPlay session ends, also go to HMG-API's log. Turning the setting off deletes the
++ * files on the next start. Reads only: nothing here changes a message or a call.
++ */
++final class Research {
++    static volatile boolean on;
++    private static Handler h;
++    private static File file, old;
++    private static FileOutputStream out;
++    private static long size;
++    private static final long MAX = 3L << 20;
++    private static final SimpleDateFormat TIME = new SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.ROOT);
++    /** "cp< 0x5201" -> count, since the last minute's summary / since the start */
++    private static final TreeMap<String, Integer> MINUTE = new TreeMap<String, Integer>(), TOTAL = new TreeMap<String, Integer>();
++    /** how many full lines each kind has had */
++    private static final HashMap<String, Integer> SHOWN = new HashMap<String, Integer>();
++    static final Map<Integer, String> NAMES = new HashMap<Integer, String>();
++
++    static {
++        // iAP2 message ids as the car's own iAP2 library names them (com.tcc.iap2.Iap2Const$MfiMsgId), plus lane guidance
++        Object[] n = {
++            0x1d00, "StartIdentification", 0x1d01, "IdentificationInformation", 0x1d02, "IdentificationAccepted",
++            0x1d03, "IdentificationRejected", 0x1d05, "CancelIdentification", 0x1d06, "IdentificationInformationUpdate",
++            0x4154, "StartCallStateUpdates", 0x4155, "CallStateUpdate", 0x4156, "StopCallStateUpdates",
++            0x4157, "StartCommunicationsUpdates", 0x4158, "CommunicationsUpdate", 0x4159, "StopCommunicationsUpdates",
++            0x415a, "InitiateCall", 0x415b, "AcceptCall", 0x415c, "EndCall", 0x415d, "SwapCalls", 0x415e, "MergeCalls",
++            0x415f, "HoldStatusUpdate", 0x4160, "MuteStatusUpdate", 0x4161, "SendDTMF",
++            0x4170, "StartListUpdates", 0x4171, "ListUpdate", 0x4172, "StopListUpdates",
++            0x4c00, "StartMediaLibraryInformation", 0x4c01, "MediaLibraryInformation", 0x4c02, "StopMediaLibraryInformation",
++            0x4c03, "StartMediaLibraryUpdates", 0x4c04, "MediaLibraryUpdate", 0x4c05, "StopMediaLibraryUpdates",
++            0x4c06, "PlayMediaLibraryCurrentSelection", 0x4c07, "PlayMediaLibraryItems", 0x4c08, "PlayMediaLibraryCollection",
++            0x4c09, "PlayMediaLibrarySpecial",
++            0x4e01, "BluetoothComponentInformation", 0x4e03, "StartBluetoothConnectionUpdates",
++            0x4e04, "BluetoothConnectionUpdate", 0x4e05, "StopBluetoothConnectionUpdates",
++            0x4e09, "DeviceInformationUpdate", 0x4e0a, "DeviceLanguageUpdate", 0x4e0b, "DeviceTimeUpdate",
++            0x4e0c, "DeviceUUIDUpdate", 0x4e0d, "WirelessCarPlayUpdate",
++            0x5000, "StartNowPlayingUpdates", 0x5001, "NowPlayingUpdate", 0x5002, "StopNowPlayingUpdates",
++            0x5003, "SetNowPlayingInformation",
++            0x5200, "StartRouteGuidanceUpdates", 0x5201, "RouteGuidanceUpdate", 0x5202, "RouteGuidanceManeuverUpdate",
++            0x5203, "StopRouteGuidanceUpdates", 0x5204, "LaneGuidanceInformation(not in the car's table)",
++            0x5700, "RequestWiFiInformation", 0x5701, "WiFiInformation",
++            0x5702, "RequestAccessoryWiFiConfigurationInformation", 0x5703, "AccessoryWiFiConfigurationInformation",
++            0x6800, "StartHID", 0x6801, "DeviceHIDReport", 0x6802, "AccessoryHIDReport", 0x6803, "StopHID",
++            0xa100, "StartVehicleStatusUpdates", 0xa101, "VehicleStatusUpdate", 0xa102, "StopVehicleStatusUpdates",
++            0xaa00, "RequestAuthenticationCertificate", 0xaa01, "AuthenticationCertificate",
++            0xaa02, "RequestAuthenticationChallengeResponse", 0xaa03, "AuthenticationResponse",
++            0xaa04, "AuthenticationFailed", 0xaa05, "AuthenticationSucceeded",
++            0xae00, "StartPowerUpdates", 0xae01, "PowerUpdate", 0xae02, "StopPowerUpdates", 0xae03, "PowerSourceUpdate",
++            0xea00, "StartExternalAccessoryProtocolSession", 0xea01, "StopExternalAccessoryProtocolSession",
++            0xea02, "RequestAppLaunch", 0xea03, "StatusExternalAccessoryProtocolSession",
++            0xfff0, "GPRMCDataStatusValuesNotification", 0xfffa, "StartLocationInformation",
++            0xfffb, "LocationInformation", 0xfffc, "StopLocationInformation",
++        };
++        for (int k = 0; k < n.length; k += 2) NAMES.put((Integer) n[k], (String) n[k + 1]);
++    }
++
++    private Research() {}
++
++    /** Dipo.start: on (the setting) opens the file; off deletes what an earlier start left */
++    static void init(Context c, boolean enable) {
++        try {
++            File dir = c.getCacheDir();
++            file = new File(dir, "g70-research.log");
++            old = new File(dir, "g70-research.log.1");
++            if (!enable) {
++                if (file.delete() | old.delete()) Dipo.log("G70 research: log off, files deleted");
++                return;
++            }
++            HandlerThread t = new HandlerThread("hmgapi-g70-research");
++            t.start();
++            h = new Handler(t.getLooper());
++            on = true;
++            line("==== DiPO started, research log on (" + file + ")");
++            h.postDelayed(MINUTE_SUMMARY, 60000);
++            Dipo.log("G70 research: log on, full record in " + file);
++        } catch (Throwable x) {
++            on = false;
++            Dipo.error("G70 research: log", x);
++        }
++    }
++
++    /** one line to the file (on the log's own thread, time taken now) */
++    static void line(final String s) {
++        if (!on) return;
++        final long now = System.currentTimeMillis();
++        h.post(new Runnable() {
++            @Override
++            public void run() {
++                write(TIME.format(new Date(now)) + " " + s + "\n");
++            }
++        });
++    }
++
++    /** a line to the file and to HMG-API's log */
++    static void both(String s) {
++        if (!on) return;
++        line(s);
++        Dipo.log("G70 research: " + s);
++    }
++
++    private static void write(String s) {
++        try {
++            if (out == null) {
++                out = new FileOutputStream(file, true);
++                size = file.length();
++            }
++            byte[] b = s.getBytes("UTF-8");
++            out.write(b);
++            out.flush();
++            size += b.length;
++            if (size > MAX) {
++                out.close();
++                out = null;
++                old.delete();
++                file.renameTo(old);
++            }
++        } catch (Throwable x) {
++            // a full disk: the log stops, CarPlay doesn't
++            on = false;
++        }
++    }
++
++    static int count(String key) {
++        synchronized (MINUTE) {
++            Integer m = MINUTE.get(key), t = TOTAL.get(key);
++            MINUTE.put(key, m == null ? 1 : m + 1);
++            int n = t == null ? 1 : t + 1;
++            TOTAL.put(key, n);
++            return n;
++        }
++    }
++
++    /** whether this kind gets a full line: the first `full`, then one in `every` */
++    static boolean show(String key, int full, int every) {
++        synchronized (SHOWN) {
++            Integer s = SHOWN.get(key);
++            int n = s == null ? 1 : s + 1;
++            SHOWN.put(key, n);
++            return n <= full || (every > 0 && n % every == 0);
++        }
++    }
++
++    static final Runnable MINUTE_SUMMARY = new Runnable() {
++        @Override
++        public void run() {
++            String s;
++            synchronized (MINUTE) {
++                s = MINUTE.isEmpty() ? null : counts(MINUTE, 200);
++                MINUTE.clear();
++            }
++            if (s != null) write(TIME.format(new Date()) + " counts 60s: " + s + "\n");
++            if (on) h.postDelayed(this, 60000);
++        }
++    };
++
++    private static String counts(Map<String, Integer> m, int max) {
++        StringBuilder b = new StringBuilder();
++        int k = 0;
++        for (Map.Entry<String, Integer> e : m.entrySet()) {
++            if (k++ == max) {
++                b.append(" ...");
++                break;
++            }
++            b.append(b.length() == 0 ? "" : ", ").append(e.getKey()).append('=').append(e.getValue());
++        }
++        return b.toString();
++    }
++
++    /** Bridge.onCpSessionFinalized: the totals so far, to HMG-API's log too */
++    static void totals(String why) {
++        if (!on) return;
++        String s;
++        synchronized (MINUTE) {
++            s = counts(TOTAL, 80);
++        }
++        both("totals (" + why + "): " + s);
++    }
++
++    // ---- iAP2 traffic ----
++
++    static int u16(byte[] b, int o) {
++        return ((b[o] & 0xff) << 8) | (b[o + 1] & 0xff);
++    }
++
++    static String hex4(int id) {
++        String s = Integer.toHexString(id);
++        while (s.length() < 4) s = "0" + s;
++        return "0x" + s;
++    }
++
++    static String hexHead(byte[] b, int len, int max) {
++        StringBuilder s = new StringBuilder();
++        for (int k = 0; k < len && k < max; k++) {
++            String x = Integer.toHexString(b[k] & 0xff);
++            s.append(x.length() == 1 ? "0" : "").append(x);
++        }
++        return s.toString();
++    }
++
++    /**
++     * iAP2 link packets (FF 5A, length, control, seq, ack, session, checksum: 9 bytes, then
++     * the payload); a control session payload is a message (40 40, length, id, parameters).
++     * dir: "bt<", "bt>", "cp<", "cp>". Only reads the bytes.
++     */
++    static void iap(String dir, byte[] b, int len) {
++        if (!on || b == null) return;
++        try {
++            if (len > b.length || len < 0) len = b.length;
++            if (len >= 6 && (b[0] & 0xff) == 0xff && (b[1] & 0xff) == 0x55) {
++                count(dir + " detect");
++                return;
++            }
++            int o = 0, packets = 0;
++            while (o + 9 <= len && (b[o] & 0xff) == 0xff && (b[o + 1] & 0xff) == 0x5a) {
++                int plen = u16(b, o + 2);
++                if (plen < 9) break;
++                int ctrl = b[o + 4] & 0xff, session = b[o + 7] & 0xff;
++                int p = o + 9, end = Math.min(o + plen, len);
++                if (end - p >= 6 && (b[p] & 0xff) == 0x40 && (b[p + 1] & 0xff) == 0x40) {
++                    message(dir, u16(b, p + 4), u16(b, p + 2), b, p, end - p);
++                } else if (end > p) {
++                    String k = dir + " session" + session + ((ctrl & 0x80) != 0 ? " syn" : "");
++                    if (count(k) == 1) line("iap " + k + ": first payload, " + (plen - 9) + " bytes (not a control message)");
++                } else {
++                    count(dir + " link");
++                }
++                packets++;
++                o += plen;
++            }
++            if (packets == 0 && len > 0) {
++                String k = dir + " other";
++                if (count(k) <= 5) line("iap " + k + ": " + len + " bytes starting " + hexHead(b, len, 12));
++            }
++        } catch (Throwable x) {
++            // reading only
++        }
++    }
++
++    private static void message(String dir, int id, int mlen, byte[] b, int p, int avail) {
++        String key = dir + " " + hex4(id);
++        int n = count(key);
++        String name = NAMES.get(id);
++        if (n == 1) both("iAP2 " + key + " " + (name == null ? "(unnamed)" : name) + ": first, " + mlen + " bytes");
++        boolean ident = id == 0x1d01 || id == 0x1d06;
++        if (!ident && !show(key, 20, 100)) return;
++        StringBuilder s = new StringBuilder("iap ").append(key).append(' ').append(name == null ? "?" : name)
++                .append(" len ").append(mlen).append(" params");
++        params(s, b, p + 6, Math.min(p + mlen, p + avail), ident ? 2 : 0);
++        line(s.toString());
++    }
++
++    /**
++     * " id:len" per parameter. depth > 0: groups are opened (a parameter whose data is
++     * exactly a run of parameters), message lists (ids 6 and 7 of identification) named,
++     * and 1, 2 and 4 byte values shown as numbers. Longer values (names, serials,
++     * addresses) never.
++     */
++    private static void params(StringBuilder s, byte[] b, int o, int end, int depth) {
++        int count = 0;
++        while (o + 4 <= end && count++ < 64) {
++            int plen = u16(b, o), pid = u16(b, o + 2);
++            if (plen < 4) break;
++            int d = o + 4, dend = Math.min(o + plen, end), dl = dend - d;
++            s.append(' ').append(pid).append(':').append(plen - 4);
++            if (depth > 0 && (pid == 6 || pid == 7) && depth == 2 && dl % 2 == 0) {
++                s.append("={");
++                for (int k = d; k + 1 < dend; k += 2) {
++                    int m = u16(b, k);
++                    String nm = NAMES.get(m);
++                    s.append(k == d ? "" : " ").append(hex4(m)).append(nm == null ? "" : "/" + nm);
++                }
++                s.append('}');
++            } else if (depth > 0 && (dl == 1 || dl == 2 || dl == 4)) {
++                long v = 0;
++                for (int k = d; k < dend; k++) v = (v << 8) | (b[k] & 0xff);
++                s.append('=').append(v);
++            } else if (depth > 0 && dl >= 4 && isGroup(b, d, dend)) {
++                s.append("=(");
++                params(s, b, d, dend, depth - 1 > 0 ? depth - 1 : 1);
++                s.append(" )");
++            }
++            o += plen;
++        }
++    }
++
++    private static boolean isGroup(byte[] b, int o, int end) {
++        int n = 0;
++        while (o + 4 <= end) {
++            int plen = u16(b, o);
++            if (plen < 4 || o + plen > end) return false;
++            o += plen;
++            n++;
++        }
++        return o == end && n > 0;
++    }
++
++    // ---- iAP2 server notifications ----
++
++    /** who: "dipo" (DiPO's own listener) or "rg" (HMG-API's route guidance listener) */
++    static void noti(String who, int what, int a1, int a2, Object msg) {
++        if (!on) return;
++        try {
++            String key = "noti " + who + " " + what;
++            int n = count(key);
++            int items = -1;
++            Iap2NotiMsg m = msg instanceof Iap2NotiMsg ? (Iap2NotiMsg) msg : null;
++            if (m != null && m.getItemGroup() != null) items = m.getItemGroup().getItemCnt();
++            if (n == 1) both(who + " listener: notification " + what + " first (a1 " + a1 + ", a2 " + a2 + ", " + (m == null ? "no message" : items + " items") + ")");
++            // route guidance in full; the rest: the first 200 of each, then one in 20
++            boolean all = "rg".equals(who) && (what == Dipo.RG_UPDATE || what == Dipo.RG_MANEUVER || what == Dipo.RG_LANES);
++            if (!all && !show(key, 200, 20)) return;
++            StringBuilder s = new StringBuilder(key).append(" a1 ").append(a1).append(" a2 ").append(a2).append(':');
++            if (m == null) s.append(msg == null ? " -" : " " + msg.getClass().getName());
++            else dump(s, m.getItemGroup(), 0);
++            line(s.toString());
++        } catch (Throwable x) {
++            // reading only
++        }
++    }
++
++    static void dump(StringBuilder b, Iap2NotiMsg.Iap2ObjGroup g, int depth) {
++        if (g == null) {
++            b.append(" (no items)");
++            return;
++        }
++        int n = g.getItemCnt();
++        for (int k = 0; k < n && k < 64; k++) {
++            Iap2NotiMsg.Iap2ObjItem it = g.getObjItem(k);
++            if (it == null) {
++                b.append(" [null]");
++                continue;
++            }
++            int t = it.getItemParamType(), c = it.getItemObjCount();
++            b.append(' ').append(it.getItemId()).append("/t").append(t).append('=');
++            try {
++                // the getter for the item's type (Iap2Const$ParamType): 0-2, 4-6, 8, 9 ints; 3, 7 longs;
++                // 10 string; 11 blob; 13 group; 12 none; 14 file descriptors (not read)
++                Iap2NotiMsg.Iap2ObjGroup[] groups = null;
++                String[] strs = null;
++                int[] ints = null;
++                long[] longs = null;
++                byte[] bytes = null;
++                if (c > 0) {
++                    if (t == 13) groups = it.getItemGroupArray();
++                    else if (t == 10) strs = it.getItemStringArray();
++                    else if (t == 3 || t == 7) longs = it.getItemLongArray();
++                    else if (t == 11) bytes = it.getItemByteArray();
++                    else if (t <= 9) ints = it.getItemIntArray();
++                }
++                if (c <= 0) b.append('-');
++                else if (t == 14) b.append("fd x").append(c);
++                else if (groups != null) {
++                    b.append('{');
++                    for (int j = 0; j < groups.length && j < 12; j++) {
++                        if (depth >= 2) {
++                            b.append(" ...");
++                            break;
++                        }
++                        b.append(j == 0 ? "" : " |");
++                        dump(b, groups[j], depth + 1);
++                    }
++                    b.append(" }");
++                } else if (strs != null) {
++                    for (int j = 0; j < strs.length && j < 6; j++) b.append(j == 0 ? "" : ",").append('"').append(mask(strs[j])).append('"');
++                } else if (ints != null) {
++                    b.append(java.util.Arrays.toString(ints.length > 12 ? java.util.Arrays.copyOf(ints, 12) : ints));
++                } else if (longs != null) {
++                    b.append(java.util.Arrays.toString(longs.length > 8 ? java.util.Arrays.copyOf(longs, 8) : longs));
++                } else if (bytes != null) {
++                    b.append("hex:").append(bytes.length > 24 ? hexHead(bytes, bytes.length, 24) + "..(" + bytes.length + ")" : hexHead(bytes, bytes.length, 24));
++                } else b.append("?n").append(c);
++            } catch (Throwable x) {
++                b.append('?');
++            }
++        }
++    }
++
++    /** texts as they are, except phone numbers, Bluetooth/Wi-Fi addresses and long ids (kept short) */
++    static String mask(String s) {
++        if (s == null) return "null";
++        if (s.length() > 120) s = s.substring(0, 120) + "..";
++        int digits = 0;
++        boolean other = false;
++        for (int k = 0; k < s.length(); k++) {
++            char ch = s.charAt(k);
++            if (ch >= '0' && ch <= '9') digits++;
++            else if ("+-() .#*".indexOf(ch) < 0) other = true;
++        }
++        if (!other && digits >= 5) {
++            StringBuilder b = new StringBuilder();
++            int seen = 0;
++            for (int k = 0; k < s.length(); k++) {
++                char ch = s.charAt(k);
++                if (ch >= '0' && ch <= '9') b.append(++seen > digits - 2 ? ch : '#');
++                else b.append(ch);
++            }
++            return b.toString();
++        }
++        s = s.replaceAll("([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}", "xx:xx:xx:xx:xx:xx");
++        s = s.replaceAll("[0-9A-Fa-f]{12,}", "<id>");
++        return s.replaceAll("[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f-]{4,}", "<uuid>");
++    }
++}

@@ -1,0 +1,398 @@
+diff -ruN a/src/hmgapi/mods/wireless/dipo/Dipo.java b/src/hmgapi/mods/wireless/dipo/Dipo.java
+--- a/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-05 00:27:13.061390347 +0000
++++ b/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-05 00:30:27.707744390 +0000
+@@ -92,6 +92,16 @@
+         bridge = m.settingBoolean("bridge", true);
+         // G70 research log (src-patches/07): on by default, off deletes its files
+         Research.init(a.context, m.settingBoolean("g70_debug", true));
++        // G70 2.5.0 (src-patches/13): song and call info on wireless CarPlay, the startup
++        // agreement (owner's choice), the car's engine and drive mode data (research log);
++        // none of it may stop CarPlay's own parts below
++        try {
++            G70Extra.media = m.settingBoolean("g70_media_info", true);
++            G70Extra.agreeWatch(a.context, m.settingBoolean("g70_agree_notice", false));
++            G70Car.start(a.context);
++        } catch (Throwable t) {
++            error("G70 extras", t);
++        }
+         // the CarPlay libraries, patched in memory once DiPO loads them (files stay stock)
+         if (bridge) m.nativePatch(a, "libCarPlayCore.so");   // AirPlay sessions over Wi-Fi
+         if (m.settingBoolean("audio", true)) {
+@@ -326,6 +336,11 @@
+                     Object manager = Points.get(cl, "dipo.iap2_client.manager", Points.get(cl, "dipo.iap2_listener.owner", p.thisObject));
+                     Points.call(cl, "dipo.iap2.set_notify_on", null, manager, true);
+                     p.setResult(null);
++                    try {
++                        G70Extra.cpChannelUp(iap2);   // G70 (src-patches/13): what DiPO asks for on USB only
++                    } catch (Throwable t) {
++                        error("G70 song and call info", t);
++                    }
+                 } else if (c == Bridge.COMPONENT_BT_CARPLAY) {
+                     p.args[0] = Bridge.COMPONENT_USB;
+                 }
+diff -ruN a/src/hmgapi/mods/wireless/dipo/G70Car.java b/src/hmgapi/mods/wireless/dipo/G70Car.java
+--- a/src/hmgapi/mods/wireless/dipo/G70Car.java	1970-01-01 00:00:00.000000000 +0000
++++ b/src/hmgapi/mods/wireless/dipo/G70Car.java	2026-11-05 00:29:01.346941694 +0000
+@@ -0,0 +1,201 @@
++package hmgapi.mods.wireless.dipo;
++
++import android.content.Context;
++
++import com.hkmc.bcm.BCMDriveListener;
++import com.hkmc.bcm.BCMManager;
++import com.hkmc.micom.DriveMode;
++import com.hkmc.micom.NModeListener;
++import com.hkmc.micom.NModeManager;
++
++import java.util.HashMap;
++
++/**
++ * G70 2.5.0 (src-patches/13): what the car reports about the engine and the drive mode,
++ * to the research log (setting g70_debug), for a sport-mode gauge page later (the owner:
++ * "BMW's M mode shows the coolant temperature; something like that in sport mode").
++ *
++ * The G70's framework has the performance data API the N cars' gauges use
++ * (NModeManager: oil and coolant temperature, power, torque and turbo boost, G-force, the
++ * individual drive mode) and the body controller's drive mode (BCMDriveListener:
++ * onDriveModeChanged, engine on/off, suspension). Whether the G70 actually sends them
++ * isn't known: this listens, and makes the two read requests the car's own screens make
++ * (NModeManager.requestOilCoolantTemperature, BCMManager.getDriveMode), at the start and
++ * once a minute. Raw bytes as they come (the format is to be worked out from them): a
++ * kind's first lines, then a line when its bytes change, at most one per kind every 2 s.
++ * Reads only; nothing is set.
++ */
++final class G70Car {
++    private G70Car() {}
++
++    static long GAP_MS = 2000;
++    static final int FIRST = 5;
++    private static final HashMap<String, String> LAST = new HashMap<String, String>();
++    private static final HashMap<String, Long> LAST_AT = new HashMap<String, Long>();
++    private static final HashMap<String, Integer> SEEN = new HashMap<String, Integer>();
++    static NModeManager nmode;
++    static BCMManager bcm;
++    static int requests;
++
++    /** Dipo.start, with the research log on */
++    static void start(Context c) {
++        if (!Research.on) return;
++        try {
++            nmode = new NModeManager(c);
++            nmode.registerNModeListener(new NListener());
++            Research.line("car: N mode data listener registered");
++        } catch (Throwable x) {
++            nmode = null;
++            Research.line("car: no N mode data: " + x);
++        }
++        try {
++            bcm = new BCMManager(c);
++            bcm.addDriveListener(new DriveListener());
++            Research.line("car: drive mode listener registered");
++        } catch (Throwable x) {
++            bcm = null;
++            Research.line("car: no drive mode listener: " + x);
++        }
++        if (nmode == null && bcm == null) return;
++        G70Extra.later(new Runnable() {
++            @Override
++            public void run() {
++                while (Research.on) {
++                    request();
++                    if (G70Extra.now) return;
++                    try {
++                        Thread.sleep(60000);
++                    } catch (InterruptedException e) {
++                        return;
++                    }
++                }
++            }
++        }, 5000, "hmgapi-g70-car");
++    }
++
++    /** the read requests the car's own screens make */
++    static void request() {
++        requests++;
++        try {
++            if (nmode != null) nmode.requestOilCoolantTemperature();
++        } catch (Throwable x) {
++            if (requests == 1) Research.line("car: oil/coolant request failed: " + x);
++        }
++        try {
++            if (bcm != null) bcm.getDriveMode();
++        } catch (Throwable x) {
++            if (requests == 1) Research.line("car: drive mode request failed: " + x);
++        }
++        if (requests == 1) {
++            try {
++                if (nmode != null) data("individual drive mode (asked)", String.valueOf(nmode.getIndividualDriveMode()));
++            } catch (Throwable x) {
++                Research.line("car: individual drive mode: " + x);
++            }
++        }
++    }
++
++    static String hex(byte[] b) {
++        if (b == null) return "null";
++        StringBuilder s = new StringBuilder(b.length * 3 + 8);
++        s.append("[").append(b.length).append("]");
++        for (byte x : b) s.append(' ').append(Character.forDigit((x >> 4) & 15, 16)).append(Character.forDigit(x & 15, 16));
++        return s.toString();
++    }
++
++    static void data(String kind, byte[] b) {
++        data(kind, hex(b));
++    }
++
++    /** a kind's value: its first lines, then changes, at most one per kind every GAP_MS */
++    static void data(String kind, String value) {
++        Research.count("car " + kind);
++        long now = System.currentTimeMillis();
++        synchronized (LAST) {
++            Integer n = SEEN.get(kind);
++            int seen = n == null ? 1 : n + 1;
++            SEEN.put(kind, seen);
++            boolean first = seen <= FIRST;
++            boolean changed = !value.equals(LAST.get(kind));
++            Long at = LAST_AT.get(kind);
++            if (!first && (!changed || (at != null && now - at < GAP_MS))) return;
++            LAST.put(kind, value);
++            LAST_AT.put(kind, now);
++        }
++        Research.line("car " + kind + ": " + value);
++    }
++
++    static final class NListener extends NModeListener {
++        @Override
++        public void onOilCoolantTemperature(byte[] b) {
++            data("oil/coolant temperature", b);
++        }
++
++        @Override
++        public void onPowerTorqueTurboBoostReceived(byte[] b) {
++            data("power/torque/boost", b);
++        }
++
++        @Override
++        public void onGForceDataReceived(byte[] b) {
++            data("g-force", b);
++        }
++
++        @Override
++        public void onSpeedTempUnitTempReceived(byte[] b) {
++            data("speed/temperature units", b);
++        }
++
++        @Override
++        public void onNAddInfoReceived(byte[] b) {
++            data("N add info", b);
++        }
++
++        @Override
++        public void onPerformanceOption(byte[] b) {
++            data("performance option", b);
++        }
++
++        @Override
++        public void onNewMyDriveModeReceived(byte[] b) {
++            data("my drive mode", b);
++        }
++
++        @Override
++        public void onDriveCustomMode2Received(byte[] b) {
++            data("custom drive mode", b);
++        }
++
++        @Override
++        public void onNModeZeroSpeedChanged(byte[] b) {
++            data("N zero speed", b);
++        }
++
++        @Override
++        public void onLapTimeDataReceived(byte[] b) {
++            data("lap time", b);
++        }
++
++        @Override
++        public void onIndividualDriveModeChanged(DriveMode m) {
++            data("individual drive mode", String.valueOf(m));
++        }
++    }
++
++    static final class DriveListener extends BCMDriveListener {
++        @Override
++        public void onDriveModeChanged(int mode) {
++            data("drive mode", String.valueOf(mode));
++        }
++
++        @Override
++        public void onEngineStatusChanged(boolean on) {
++            data("engine", on ? "on" : "off");
++        }
++
++        @Override
++        public void onEcsStatusChanged(int a, int b, int c, int d, int e, int f, int g, int h, int i) {
++            data("suspension (ECS)", a + " " + b + " " + c + " " + d + " " + e + " " + f + " " + g + " " + h + " " + i);
++        }
++    }
++}
+diff -ruN a/src/hmgapi/mods/wireless/dipo/G70Extra.java b/src/hmgapi/mods/wireless/dipo/G70Extra.java
+--- a/src/hmgapi/mods/wireless/dipo/G70Extra.java	1970-01-01 00:00:00.000000000 +0000
++++ b/src/hmgapi/mods/wireless/dipo/G70Extra.java	2026-11-05 00:27:46.085940841 +0000
+@@ -0,0 +1,157 @@
++package hmgapi.mods.wireless.dipo;
++
++import android.content.Context;
++
++/**
++ * G70 2.5.0 (src-patches/13), in DiPO's process.
++ *
++ * Song and call info on wireless CarPlay (setting g70_media_info, on by default): DiPO
++ * asks the iPhone for now playing and call state when a CarPlay session starts
++ * (setStartiAP2Service: Iap2SvcNowPlayingStart, Iap2SvcTelephonyStartCallState,
++ * Iap2SvcTelephonyStartUpdates), but skips all three when the session is wireless, so
++ * the cluster never gets the song (its path is there: DiPO's now playing notification,
++ * then ClusterManager.onUpdateClusterWithArtistInfo). In three days of logs the car
++ * never sent StartNowPlayingUpdates (0x5000) on the CarPlay channel. Here the same three
++ * calls go out once the wireless CarPlay channel's iAP2 session (component 5) is up, as
++ * DiPO makes them for USB. The K8 HEV package does the same ("곡 정보 구독").
++ *
++ * The startup agreement (setting g70_agree_notice, off by default): the screen the car
++ * shows at every start until the driver presses agree. When the owner turns this on,
++ * HMG-API presses it for them through the car's own call (ModeManager.agreeUserLicense,
++ * what the agree button does), once per start. The research log records the agreement's
++ * state (ModeManager.isUserClickedAgree) and the regulation service's consent and popup
++ * states for the first minutes after a start, to tell which screen is which.
++ */
++final class G70Extra {
++    private G70Extra() {}
++
++    static boolean media;
++    /** host tests: run at once instead of on a thread after a delay */
++    static boolean now;
++    static int mediaStarts;
++
++    static final String[] MEDIA_CALLS = { "Iap2SvcNowPlayingStart", "Iap2SvcTelephonyStartCallState", "Iap2SvcTelephonyStartUpdates" };
++
++    static void later(final Runnable r, final long ms, String name) {
++        if (now) {
++            r.run();
++            return;
++        }
++        Thread t = new Thread(new Runnable() {
++            @Override
++            public void run() {
++                try {
++                    Thread.sleep(ms);
++                    r.run();
++                } catch (Throwable x) {
++                    Dipo.error("G70 " + Thread.currentThread().getName(), x);
++                }
++            }
++        }, name);
++        t.setDaemon(true);
++        t.start();
++    }
++
++    /** the wireless CarPlay channel's iAP2 session (component 5) is up: now playing and call state, as DiPO asks for them on USB */
++    static void cpChannelUp(final Object iap2) {
++        if (!media) return;
++        if (iap2 == null) {
++            Dipo.log("G70: no iAP2 server for song and call info");
++            return;
++        }
++        later(new Runnable() {
++            @Override
++            public void run() {
++                StringBuilder s = new StringBuilder();
++                for (String m : MEDIA_CALLS) s.append(s.length() == 0 ? "" : ", ").append(call(iap2, m));
++                mediaStarts++;
++                Dipo.log("G70: song and call info asked for on wireless CarPlay (" + mediaStarts + "): " + s);
++                Research.line("media: " + s);
++            }
++        }, 1000, "hmgapi-g70-media");
++    }
++
++    /** a no-argument call on the iAP2 server (the methods are DiPO's com.tcc.iap2.IIap2Service's) */
++    static String call(Object o, String name) {
++        try {
++            Object r = o.getClass().getMethod(name).invoke(o);
++            return name + " " + r;
++        } catch (java.lang.reflect.InvocationTargetException x) {
++            return name + " failed: " + x.getCause();
++        } catch (Throwable x) {
++            return name + " failed: " + x;
++        }
++    }
++
++    // ---- the startup agreement ----
++
++    static final int WATCH_S = 180;
++    static boolean agreed;
++    static String lastState;
++    /** the car's managers, made once */
++    static Object mm, reg;
++
++    /** Dipo.start: watch the startup agreement for the first minutes; agree for the owner if they turned it on */
++    static void agreeWatch(final Context c, final boolean agree) {
++        if (!agree && !Research.on) return;
++        later(new Runnable() {
++            @Override
++            public void run() {
++                for (int i = 0; i < WATCH_S; i++) {
++                    if (agreeStep(c, agree, i)) break;
++                    try {
++                        Thread.sleep(1000);
++                    } catch (InterruptedException e) {
++                        return;
++                    }
++                }
++            }
++        }, 0, "hmgapi-g70-agree");
++    }
++
++    /** one look (a second apart): true when there's nothing more to do */
++    static boolean agreeStep(Context c, boolean agree, int second) {
++        if (mm == null) mm = modeManager(c);
++        if (reg == null) reg = regulation(c);
++        Boolean clicked = mm == null ? null : (Boolean) callQuiet(mm, "isUserClickedAgree");
++        Object consent = reg == null ? null : callQuiet(reg, "getOccupationConsentState");
++        Object popup = reg == null ? null : callQuiet(reg, "getOccupationPopupState");
++        String state = "user agreed " + clicked + ", occupation consent " + consent + ", occupation popup " + popup;
++        if (!state.equals(lastState)) {
++            lastState = state;
++            Research.line("agree: " + state + " (" + second + " s after DiPO's start)");
++        }
++        if (agree && !agreed && Boolean.FALSE.equals(clicked)) {
++            agreed = true;
++            String r = call(mm, "agreeUserLicense");
++            Dipo.log("G70: startup agreement pressed for the owner (setting g70_agree_notice): " + r);
++            Research.line("agree: pressed for the owner: " + r);
++        }
++        // research watches the whole time; agreeing alone stops once it's done
++        return !Research.on && (agreed || Boolean.TRUE.equals(clicked));
++    }
++
++    static Object modeManager(Context c) {
++        try {
++            return Class.forName("com.hkmc.mode.ModeManager").getConstructor(Context.class).newInstance(c);
++        } catch (Throwable x) {
++            return null;
++        }
++    }
++
++    static Object regulation(Context c) {
++        try {
++            return Class.forName("com.hkmc.regulation.RegulationActivityManager").getMethod("getInstance", Context.class).invoke(null, c);
++        } catch (Throwable x) {
++            return null;
++        }
++    }
++
++    static Object callQuiet(Object o, String name) {
++        try {
++            return o.getClass().getMethod(name).invoke(o);
++        } catch (Throwable x) {
++            return null;
++        }
++    }
++}

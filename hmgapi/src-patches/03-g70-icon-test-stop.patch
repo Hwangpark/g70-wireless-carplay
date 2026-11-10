@@ -1,0 +1,165 @@
+diff -ru a/src/hmgapi/mods/wireless/dipo/CpTurns.java b/src/hmgapi/mods/wireless/dipo/CpTurns.java
+--- a/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-03 07:53:12.053434845 +0000
++++ b/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-03 10:27:05.452860622 +0000
+@@ -411,6 +411,7 @@
+ 
+     /** the iAP2 session ended (DiPO e/u.disconnected) */
+     void disconnected() {
++        stopIconTest("session ended");
+         reset();
+         hudBlank();
+         source = null;
+@@ -424,6 +425,102 @@
+         hudBlank();
+     }
+ 
++    /**
++     * G70: DiPO asked the phone to stop route guidance (the route ended, or another app
++     * takes over). The "no route" that follows is the end, not the other name's noise:
++     * nothing is kept over it (drive log 11/03: the HUD arrow stayed 30 s after it).
++     */
++    void dipoStopped() {
++        navName = null;
++        cancelStop();
++    }
++
++    /** G70: HUD icon test (setting g70_icon_test): the codes to show, the next one (-1: not started) */
++    int[] testCodes;
++    int testAt = -1;
++    Runnable testStep;
++
++    /** the codes for a g70_icon_test choice; null when off */
++    static int[] testCodes(String choice) {
++        if (choice == null) return null;
++        if (choice.equals("known")) {
++            return new int[] { 3, 65, 66, 67, 68, 69, 70, 71, 72, 73, 81, 82, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106,
++                    107, 112, 113, 114, 144, 145, 172, 173, 174, 176 };
++        }
++        int dash = choice.indexOf('-');
++        if (dash <= 0) return null;
++        try {
++            int from = Integer.parseInt(choice.substring(0, dash)), to = Integer.parseInt(choice.substring(dash + 1));
++            if (from < 1 || to > 255 || to < from) return null;
++            int[] r = new int[to - from + 1];
++            for (int k = 0; k < r.length; k++) r[k] = from + k;
++            return r;
++        } catch (NumberFormatException e) {
++            return null;
++        }
++    }
++
++    /**
++     * G70: while the test runs, route guidance updates don't reach the cluster: the
++     * test starts with the first update that has a route (so the cluster is showing
++     * phone guidance) and shows one code every 3 s, the code also as the HUD distance.
++     */
++    boolean iconTest() {
++        if (testCodes == null || testAt >= testCodes.length) return false;
++        if (testAt < 0) {
++            testAt = 0;
++            Dipo.log("CarPlay: HUD icon test: " + testCodes.length + " codes, 3 s each; the HUD distance shows the code");
++            scheduleTest(0);
++        }
++        return true;
++    }
++
++    void scheduleTest(long delay) {
++        if (Dipo.turnsHandler == null) return;
++        testStep = new Runnable() {
++            @Override
++            public void run() {
++                try {
++                    stepTest();
++                } catch (Throwable x) {
++                    Dipo.error("CarPlay icon test", x);
++                }
++            }
++        };
++        Dipo.turnsHandler.postDelayed(testStep, delay);
++    }
++
++    void stepTest() {
++        if (testCodes == null || testAt < 0 || testAt >= testCodes.length) return;
++        int code = testCodes[testAt++];
++        Dipo.log("CarPlay: HUD icon test " + testAt + "/" + testCodes.length + ": code " + code);
++        cluster.crossroadName("TEST " + code);
++        cluster.tbtInfo(code, 0, 0f, code, 0, 0, Cluster.UNIT_M, 0, 0);
++        if (code >= 64) {
++            byte[] f = new byte[5];
++            f[0] = (byte) 0xF2;
++            f[1] = 1;
++            f[2] = (byte) code;
++            cluster.turnListNew(f);
++        }
++        cluster.tbtSubInfo2C(Cluster.UNIT_M, 0, code, 0, 0, 0, 0, 0, 0);
++        if (testAt < testCodes.length) {
++            scheduleTest(3000L);
++        } else {
++            Dipo.log("CarPlay: HUD icon test done, route guidance shows again with the next update");
++            hudType = -1;
++        }
++    }
++
++    /** the car's driving restriction began (or the session ended): the test ends at once */
++    void stopIconTest(String why) {
++        if (testCodes == null || testAt < 0 || testAt >= testCodes.length) return;
++        testAt = testCodes.length;
++        if (testStep != null && Dipo.turnsHandler != null) Dipo.turnsHandler.removeCallbacks(testStep);
++        hudType = -1;
++        Dipo.log("CarPlay: HUD icon test stopped (" + why + ")");
++    }
++
+     /** forget every component's state and maneuvers (DiPO e/u.nT) */
+     void reset() {
+         for (LinkedHashMap<Integer, Maneuver> m : maneuvers.values()) {
+@@ -470,6 +567,7 @@
+             stop();
+             return;
+         }
++        if (iconTest()) return;
+         int[] list = u.list == null ? null : u.list.clone();
+         float dist = 0f;
+         if (u.nextStr != null && !u.nextStr.equals("")) {
+@@ -511,7 +609,7 @@
+             dbgWhy("no cluster icon for maneuver type " + x.type + " side " + x.side + " junction " + x.junction + " exit " + x.exit);
+             return;
+         }
+-        dbgWhy("sending: icon " + icon + " unit " + unit + " state " + u.state);
++        dbgWhy("sending: icon " + icon + " for type " + x.type + " (exit " + x.exit + ") unit " + unit + " state " + u.state);
+         cluster.tbtInfo(icon, 0, 0f, dist, 0, 0, unit, 0, 0);
+         sendHud(icon, id, u);
+         sendHudDist(dist, unit);
+diff -ru a/src/hmgapi/mods/wireless/dipo/Dipo.java b/src/hmgapi/mods/wireless/dipo/Dipo.java
+--- a/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-03 07:53:21.577043969 +0000
++++ b/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-03 10:27:05.453329558 +0000
+@@ -130,6 +130,22 @@
+             }
+         });
+         rg = new RgListener();
++        // G70: HUD icon test (off unless the owner picks codes in the mod's settings)
++        turns.testCodes = CpTurns.testCodes(mod.settingString("g70_icon_test", "off"));
++        if (turns.testCodes != null) {
++            log("CarPlay: HUD icon test armed (" + turns.testCodes.length + " codes): start route guidance while parked");
++            app.context.registerReceiver(new android.content.BroadcastReceiver() {
++                @Override
++                public void onReceive(Context c, Intent i) {
++                    post(new Runnable() {
++                        @Override
++                        public void run() {
++                            turns.stopIconTest("driving restriction");
++                        }
++                    });
++                }
++            }, new android.content.IntentFilter("android.mobis.regulation.ACTION_ENTER_REGULATION"));
++        }
+         mod.hook(app.classLoader, "dipo.iap2_proxy.stop_route_guidance", new MethodHook() {
+             @Override
+             protected void beforeHookedMethod(Param p) {
+@@ -141,6 +157,7 @@
+                 post(new Runnable() {
+                     @Override
+                     public void run() {
++                        turns.dipoStopped();
+                         turns.stop();
+                     }
+                 });

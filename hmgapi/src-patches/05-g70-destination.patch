@@ -1,0 +1,43 @@
+diff -ru a/src/hmgapi/mods/wireless/dipo/CpTurns.java b/src/hmgapi/mods/wireless/dipo/CpTurns.java
+--- a/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-03 10:43:25.858211496 +0000
++++ b/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-03 11:47:37.374389052 +0000
+@@ -455,6 +455,23 @@
+     /** route guidance stopped (DiPO e/u.nS: the car's navigation took turn-by-turn back, or state 0) */
+     void stop() {
+         hudBlank();
++        sentDest = null;
++    }
++
++    /** G70: the destination name last sent outside state 6 (null: none yet for this route) */
++    String sentDest;
++
++    /**
++     * G70: the destination name on the cluster for apps that never use state 6. The
++     * build sends it only in state 6 (proceed to the route), which Apple Maps uses and
++     * TMAP doesn't: TMAP goes 3 -> 1 and sends its destination (item 4) all along (drive
++     * log 11/03), so the cluster kept no or an old destination. Sent when it changes.
++     */
++    void g70Destination(Update u) {
++        if (u.state <= 0 || u.destination == null || u.destination.length() == 0 || u.destination.equals(sentDest)) return;
++        cluster.destinationName(0, u.destination);
++        sentDest = u.destination;
++        Dipo.log("CarPlay: destination name to the cluster (" + u.destination.length() + " chars, state " + u.state + ")");
+     }
+ 
+     /**
+@@ -555,6 +572,7 @@
+ 
+     /** forget every component's state and maneuvers (DiPO e/u.nT) */
+     void reset() {
++        sentDest = null;
+         for (LinkedHashMap<Integer, Maneuver> m : maneuvers.values()) {
+             if (m != null) m.clear();
+         }
+@@ -611,6 +629,7 @@
+             }
+         }
+         if (u.state == 6) cluster.destinationName(0, u.destination);
++        else g70Destination(u);
+         LinkedHashMap<Integer, Maneuver> m = maneuvers.get(id);
+         if (m == null || list == null) {
+             dbgWhy("state " + u.state + ": " + (m == null ? "no maneuvers for component " + id + " (have " + maneuvers.keySet() + ")" : "")

@@ -1,0 +1,100 @@
+diff -ruN a/src/hmgapi/mods/wireless/dipo/CpTurns.java b/src/hmgapi/mods/wireless/dipo/CpTurns.java
+--- a/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-07 07:11:54.662479145 +0000
++++ b/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-07 07:12:01.110800025 +0000
+@@ -881,8 +881,8 @@
+     boolean stockStyle;
+     /** G70 2.6.2: the turn's name above a junction picture at any distance (setting g70_hud_name "always") */
+     boolean hudNameAlways;
+-    /** the maneuver whose junction picture is showing, and the distance (m) it started at */
+-    int jctIndex = -1, jctStart;
++    /** the maneuver whose junction picture is showing */
++    int jctIndex = -1;
+     /** what the HUD list and the name above the picture last were (not resent unchanged) */
+     String stockHudKey, stockName;
+     boolean arrivedSent;
+@@ -982,10 +982,45 @@
+         return 1 << k;
+     }
+ 
+-    /** the distance bar: 90 when the picture starts, down to 10 */
+-    static int stockBar(int m, int start) {
+-        if (start <= 0) return 10;
+-        return Math.max(10, Math.min(90, (int) Math.ceil(m * 9.0 / start) * 10));
++    /**
++     * G70 2.6.6 (src-patches/22): the distance bar on the car's navigation's own scale of the
++     * distance left, not from where the picture started: 38 junction pictures of its guidance
++     * (11/04, 11/05, 11/07) step at the same distances whatever the start, and a picture that
++     * starts late (two turns close together) starts low (180 m: 50, 220 m: 60, 90 m: 20), where
++     * 2.4.0-2.6.5 started every picture at 90.
++     *   pictures from 300-400 m (crossings, U-turns): 90 above about 320 m, then a step every
++     *     35 m: 80 to 285, 70 to 250, 60 to 215, 50 to 180, 40 to 145, 30 to 110, 20 to 75, 10
++     *   from 600 m (highway keep, ramps): 80 under 580, 70 under 480, 60 under 430, 50 under 350,
++     *     40 under 280, 30 under 220, 20 under 170, 10 under 110
++     *   from 1 km (highway exit 17, tollgate): a step every 100 m, 90 at 1 km, 10 at 200 m
++     */
++    static int stockBar(int m, int scale) {
++        int bar;
++        if (scale >= 1000) {
++            bar = (m / 100 - 1) * 10;
++        } else if (scale >= 600) {
++            bar = 90;
++            for (int i = 0; i < BAR_600.length; i++) if (m < BAR_600[i]) bar = 80 - 10 * i;
++        } else {
++            bar = m < 75 ? 10 : 20 + 10 * ((m - 75) / 35);
++        }
++        return Math.max(10, Math.min(90, bar));
++    }
++
++    static final int[] BAR_600 = { 580, 480, 430, 350, 280, 220, 170, 110 };
++
++    /**
++     * G70 2.6.6: the distance as the car's navigation shows it near a turn: tens of metres
++     * under 300 m, hundreds from 300 m, km with one decimal from 1 km (its pictures: 400, 300,
++     * 270, 240 ... and 1.0 km, 900 m ...); 2.4.0-2.6.5 sent tens of metres (390 m, 1000 m)
++     */
++    static int stockMeters(int m) {
++        return m >= 300 ? m / 100 * 100 : m / 10 * 10;
++    }
++
++    /** a {@link #stockMeters} distance to the cluster: {value, unit} */
++    static float[] stockDist(int shown) {
++        return shown >= 1000 ? new float[] { shown / 100 / 10f, Cluster.UNIT_KM } : new float[] { shown, Cluster.UNIT_M };
+     }
+ 
+     static String stockNameOf(Maneuver x) {
+@@ -1024,18 +1059,21 @@
+         if (j != null && meters > 0 && meters <= (int) j[3]) {
+             if (jctIndex != x.index) {
+                 jctIndex = x.index;
+-                jctStart = Math.max(meters, 50);
+                 Dipo.log("CarPlay: G70 junction picture " + (int) j[0] + " (side " + (int) j[1] + ", " + j[2] + " deg) for maneuver "
+                         + x.index + " (type " + x.type + ") at " + meters + " m");
+             }
+-            cluster.tbtInfo((int) j[0], (int) j[1], j[2], meters / 10 * 10, 0, 0, Cluster.UNIT_M, stockBar(meters, jctStart), 0);
+-            stockNear(x, meters / 10 * 10, y, z);
++            int shown = stockMeters(meters);
++            float[] sd = stockDist(shown);
++            cluster.tbtInfo((int) j[0], (int) j[1], j[2], sd[0], 0, 0, (int) sd[1], stockBar(meters, (int) j[3]), 0);
++            stockNear(x, shown, y, z);
+             return;
+         }
+         if (icon == 178 && meters > 0 && meters <= 1000) {
+             // tollgate: the bar from 1 km (11/05: 1.1 km 90 ... 210 m 10; a ramp tollgate 500 m 50)
+-            cluster.tbtInfo(178, 0, 1912.5f, meters / 10 * 10, 0, 15, Cluster.UNIT_M, stockBar(meters, 1000), 0);
+-            stockNear(x, meters / 10 * 10, y, z);
++            int shown = stockMeters(meters);
++            float[] sd = stockDist(shown);
++            cluster.tbtInfo(178, 0, 1912.5f, sd[0], 0, 15, (int) sd[1], stockBar(meters, 1000), 0);
++            stockNear(x, shown, y, z);
+             return;
+         }
+         // far: under 1 km in hundreds of metres, as the car's navigation (900, 800 ... 400 m)
+@@ -1066,7 +1104,7 @@
+     void stockNear(Maneuver x, int meters, Maneuver y, Maneuver z) {
+         stockName(stockNameOf(x));
+         stockHud(0, 0, 0, null);
+-        cluster.tbtSubInfo2C(0, 0, meters, tripleM(y == null ? -1 : y.distance, 0), tripleM(y == null ? -1 : y.distance, 1),
++        cluster.tbtSubInfo2C(tripleM(meters, 0), tripleM(meters, 1), tripleM(meters, 2), tripleM(y == null ? -1 : y.distance, 0), tripleM(y == null ? -1 : y.distance, 1),
+                 tripleM(y == null ? -1 : y.distance, 2), tripleM(z == null ? -1 : z.distance, 0), tripleM(z == null ? -1 : z.distance, 1),
+                 tripleM(z == null ? -1 : z.distance, 2));
+     }

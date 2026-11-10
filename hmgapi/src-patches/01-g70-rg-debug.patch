@@ -1,0 +1,174 @@
+diff -ru a/src/hmgapi/mods/wireless/dipo/CpTurns.java b/src/hmgapi/mods/wireless/dipo/CpTurns.java
+--- a/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-03 07:16:54.566710596 +0000
++++ b/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-03 07:17:19.752439816 +0000
+@@ -44,6 +44,68 @@
+     /** component id -> maneuver index -> maneuver (DiPO e/u.Am) */
+     final LinkedHashMap<Integer, LinkedHashMap<Integer, Maneuver>> maneuvers = new LinkedHashMap<Integer, LinkedHashMap<Integer, Maneuver>>();
+     String source;
++    /** G70 debug: how many route guidance / maneuver messages were dumped, and the last turn() outcome */
++    int dbgRg, dbgMan;
++    String dbgWhy;
++
++    /** G70 debug: one line per message, item id / param type / count = values (strings only by length, except the source name) */
++    static void dbgDump(String what, Iap2NotiMsg msg) {
++        try {
++            Iap2NotiMsg.Iap2ObjGroup g = msg == null ? null : msg.getItemGroup();
++            if (g == null) {
++                Dipo.log("CarPlay dbg " + what + ": no item group");
++                return;
++            }
++            StringBuilder b = new StringBuilder("CarPlay dbg ").append(what).append(':');
++            for (int k = 0; k < g.getItemCnt(); k++) {
++                Iap2NotiMsg.Iap2ObjItem it = g.getObjItem(k);
++                if (it == null) {
++                    b.append(" [null]");
++                    continue;
++                }
++                int t = it.getItemParamType(), n = it.getItemObjCount(), id = it.getItemId();
++                b.append(' ').append(id).append("/t").append(t).append("/n").append(n).append('=');
++                try {
++                    if (n <= 0) {
++                        b.append('-');
++                    } else if (t == 10) {
++                        String[] v = it.getItemStringArray();
++                        String x = v == null || v.length == 0 ? null : v[0];
++                        if (x == null) b.append("null");
++                        else if (id == 19) b.append('"').append(x).append('"');
++                        else b.append("str").append(x.length());
++                    } else if (t == 3 || t == 7) {
++                        long[] v = it.getItemLongArray();
++                        b.append(v == null ? "null" : java.util.Arrays.toString(v.length > 6 ? java.util.Arrays.copyOf(v, 6) : v));
++                    } else {
++                        int[] v = it.getItemIntArray();
++                        b.append(v == null ? "null" : java.util.Arrays.toString(v.length > 8 ? java.util.Arrays.copyOf(v, 8) : v));
++                    }
++                } catch (Throwable x) {
++                    b.append('?');
++                }
++            }
++            Dipo.log(b.toString());
++        } catch (Throwable x) {
++            Dipo.log("CarPlay dbg " + what + " failed: " + x);
++        }
++    }
++
++    /** G70 debug: log why turn() stopped, once per change */
++    void dbgWhy(String w) {
++        if (w.equals(dbgWhy)) return;
++        dbgWhy = w;
++        Dipo.log("CarPlay dbg turn: " + w);
++    }
++
++    /** G70: the same app under another language's name (Apple 지도 / Apple Maps) isn't a new source */
++    static boolean sameApp(String a, String b) {
++        if (a == null || b == null) return false;
++        if (a.equalsIgnoreCase(b)) return true;
++        String x = a.trim().toLowerCase(java.util.Locale.ROOT), y = b.trim().toLowerCase(java.util.Locale.ROOT);
++        int i = x.indexOf(' '), j = y.indexOf(' ');
++        return i > 0 && j > 0 && x.substring(0, i).equals(y.substring(0, j)) && x.startsWith("apple") ;
++    }
+     /** last HUD list sent (type, next, road), so an unchanged one isn't resent */
+     int hudType, hudNext;
+     String hudRoad;
+@@ -57,6 +119,10 @@
+     /** RouteGuidanceUpdate (DiPO e/u.c) */
+     void routeGuidance(Iap2NotiMsg msg) {
+         if (msg == null) return;
++        if (dbgRg < 8) {
++            dbgRg++;
++            dbgDump("RG#" + dbgRg, msg);
++        }
+         sourceCheck(msg);
+         int[] ids = componentIds(msg);
+         if (ids == null) {
+@@ -100,6 +166,10 @@
+      */
+     void maneuver(Iap2NotiMsg msg) {
+         if (msg == null) return;
++        if (dbgMan < 12) {
++            dbgMan++;
++            dbgDump("MAN#" + dbgMan, msg);
++        }
+         int index = -1;
+         int[] ids = null;
+         Iap2NotiMsg.Iap2ObjGroup g = msg.getItemGroup();
+@@ -265,6 +335,10 @@
+             String was = source;
+             source = s;
+             if (was == null || was.equals(s)) return;
++            if (sameApp(was, s)) {
++                Dipo.log("CarPlay: route guidance source name " + was + " -> " + s + " (same app, kept)");
++                return;
++            }
+             Dipo.log("CarPlay: route guidance source changed from " + was + " to " + s + ", clearing turn-by-turn");
+             reset();
+             hudBlank();
+@@ -275,8 +349,12 @@
+ 
+     /** one component's update to the cluster (DiPO e/u.a(Integer, Object), with the build's changes) */
+     void turn(Integer id, Update u) {
+-        if (id < 0 || u == null) return;
++        if (id < 0 || u == null) {
++            dbgWhy("no update (component " + id + ")");
++            return;
++        }
+         if (u.state == 0) {
++            dbgWhy("state 0 (not navigating)");
+             stop();
+             return;
+         }
+@@ -292,9 +370,16 @@
+         }
+         if (u.state == 6) cluster.destinationName(0, u.destination);
+         LinkedHashMap<Integer, Maneuver> m = maneuvers.get(id);
+-        if (m == null || list == null) return;
++        if (m == null || list == null) {
++            dbgWhy("state " + u.state + ": " + (m == null ? "no maneuvers for component " + id + " (have " + maneuvers.keySet() + ")" : "")
++                    + (list == null ? " no maneuver list" : " list " + java.util.Arrays.toString(list)));
++            return;
++        }
+         Maneuver x = m.get(list[0]);
+-        if (x == null) return;
++        if (x == null) {
++            dbgWhy("state " + u.state + ": maneuver " + list[0] + " not received (have " + m.keySet() + ")");
++            return;
++        }
+         int unit;
+         switch (u.nextUnits) {
+             case 0: unit = Cluster.UNIT_KM; break;
+@@ -305,7 +390,11 @@
+         }
+         int icon = icon(x.type, x.side, x.junction, x.exit, u.state);
+         cluster.crossroadName(x.afterRoad);
+-        if (icon == 0) return;
++        if (icon == 0) {
++            dbgWhy("no cluster icon for maneuver type " + x.type + " side " + x.side + " junction " + x.junction + " exit " + x.exit);
++            return;
++        }
++        dbgWhy("sending: icon " + icon + " dist " + dist + " unit " + unit + " state " + u.state);
+         cluster.tbtInfo(icon, 0, 0f, dist, 0, 0, unit, 0, 0);
+         sendHud(icon, id, u);
+         sendHudDist(dist, unit);
+diff -ru a/src/hmgapi/mods/wireless/dipo/Dipo.java b/src/hmgapi/mods/wireless/dipo/Dipo.java
+--- a/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-03 07:16:54.566873550 +0000
++++ b/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-03 07:17:19.752677904 +0000
+@@ -187,6 +187,9 @@
+     }
+ 
+     /** HMG-API's iAP2 listener for route guidance: everything goes to CpTurns on its thread */
++    /** G70 debug: notification codes seen by the route guidance listener */
++    static final java.util.Set<Integer> SEEN = new java.util.HashSet<Integer>();
++
+     static final class RgListener extends IIap2Listener.Stub {
+         @Override
+         public void connected(int component, String serial) {}
+@@ -205,6 +208,9 @@
+ 
+         @Override
+         public void notify(final int what, int a1, int a2, final Iap2NotiMsg msg) {
++            synchronized (SEEN) {
++                if (SEEN.add(what)) log("CarPlay dbg: route guidance listener got noti " + what + " (msg " + (msg != null) + ")");
++            }
+             if ((what != RG_UPDATE && what != RG_MANEUVER && what != RG_LANES) || msg == null) return;
+             post(new Runnable() {
+                 @Override

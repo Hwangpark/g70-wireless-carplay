@@ -1,0 +1,103 @@
+diff -ruN a/src/hmgapi/mods/wireless/dipo/G70Car.java b/src/hmgapi/mods/wireless/dipo/G70Car.java
+--- a/src/hmgapi/mods/wireless/dipo/G70Car.java	2026-11-05 05:20:47.390691928 +0000
++++ b/src/hmgapi/mods/wireless/dipo/G70Car.java	2026-11-05 05:20:47.442305260 +0000
+@@ -203,7 +203,7 @@
+     static final class DriveListener extends BCMDriveListener {
+         @Override
+         public void onDriveModeChanged(int mode) {
+-            data("drive mode", String.valueOf(mode));
++            data("body control drive mode", String.valueOf(mode));   // 2.6.1: -1 on the G70; apart from the N mode one
+         }
+ 
+         @Override
+diff -ruN a/src/hmgapi/mods/wireless/dipo/G70Extra.java b/src/hmgapi/mods/wireless/dipo/G70Extra.java
+--- a/src/hmgapi/mods/wireless/dipo/G70Extra.java	2026-11-05 05:20:47.390465778 +0000
++++ b/src/hmgapi/mods/wireless/dipo/G70Extra.java	2026-11-05 05:20:47.442480010 +0000
+@@ -145,11 +145,24 @@
+             lastState = state;
+             Research.line("agree: " + state + " (" + second + " s after DiPO's start)");
+         }
+-        if (agree && !agreed && Boolean.FALSE.equals(clicked)) {
++        // 2.6.1: pressed at the start (11/05 14:11:36) it didn't hold: a second later the car's
++        // mode manager still said not agreed, and only the owner's own press, 17 s in, changed
++        // it (the agreement screen sets it back when it comes up). So: again every 2 s while
++        // it says not agreed, up to MAX_PRESSES; and the screen in front is logged as it
++        // changes, to name the app that shows the agreement.
++        String top = topActivity(c);
++        if (top != null && !top.equals(lastTop)) {
++            lastTop = top;
++            Research.line("agree: screen in front: " + top + " (" + second + " s)");
++        }
++        if (agree && Boolean.FALSE.equals(clicked) && presses < MAX_PRESSES && second - lastPress >= 2) {
++            presses++;
++            lastPress = second;
+             agreed = true;
+             String r = call(mm, "agreeUserLicense");
+-            Dipo.log("G70: startup agreement pressed for the owner (setting g70_agree_notice): " + r);
+-            Research.line("agree: pressed for the owner: " + r);
++            if (presses == 1) Dipo.log("G70: startup agreement pressed for the owner (setting g70_agree_notice): " + r);
++            Research.line("agree: pressed for the owner (" + presses + ", " + second + " s): " + r);
++            clicked = (Boolean) callQuiet(mm, "isUserClickedAgree");
+         }
+         // 2.5.2: the screen the owner meant is the navigation's: on 11/05 the mode manager's
+         // agreement was already given 7 s after the start, while the regulation service's
+@@ -163,12 +176,29 @@
+             Research.line("agree: navigation (occupation) consent given for the owner: " + r);
+         }
+         // research watches the whole time; agreeing alone stops once both are done
+-        boolean modeDone = agreed || Boolean.TRUE.equals(clicked);
++        boolean modeDone = Boolean.TRUE.equals(clicked) || presses >= MAX_PRESSES;
+         boolean occupationDone = occupationSet || one.equals(consent);
+         return !Research.on && (!agree || (modeDone && occupationDone));
+     }
+ 
+     static boolean occupationSet;
++    static final int MAX_PRESSES = 30;
++    static int presses, lastPress = -100;
++    static String lastTop;
++
++    /** the activity in front (DiPO holds GET_TASKS), null when it can't be read */
++    static String topActivity(Context c) {
++        try {
++            Object am = c.getClass().getMethod("getSystemService", String.class).invoke(c, "activity");
++            java.util.List<?> t = (java.util.List<?>) am.getClass().getMethod("getRunningTasks", int.class).invoke(am, 1);
++            if (t == null || t.isEmpty()) return null;
++            Object info = t.get(0);
++            Object cn = info.getClass().getField("topActivity").get(info);
++            return cn == null ? null : (String) cn.getClass().getMethod("flattenToShortString").invoke(cn);
++        } catch (Throwable x) {
++            return null;
++        }
++    }
+ 
+     static String callInt(Object o, String name, int v) {
+         try {
+diff -ruN a/src/hmgapi/mods/wireless/dipo/G70Gauge.java b/src/hmgapi/mods/wireless/dipo/G70Gauge.java
+--- a/src/hmgapi/mods/wireless/dipo/G70Gauge.java	2026-11-05 05:20:47.390808363 +0000
++++ b/src/hmgapi/mods/wireless/dipo/G70Gauge.java	2026-11-05 05:20:47.440913995 +0000
+@@ -82,13 +82,20 @@
+         }
+     }
+ 
+-    /** DriveMode.mCurrentDriveMode (a public byte on the car's class), -1 when it can't be read */
++    /**
++     * DriveMode's current mode, -1 when it can't be read. 2.6.1: on the car the public byte
++     * is spelled mCurrentDrviceMode (its toString prints "mCurrentDriveMode"), so 2.6.0 read
++     * -1 every time (11/05 14:12) and never saw sport mode.
++     */
+     static int currentDriveMode(Object m) {
+-        try {
+-            return m.getClass().getField("mCurrentDriveMode").getByte(m) & 0xff;
+-        } catch (Throwable t) {
+-            return -1;
++        for (String f : new String[] { "mCurrentDrviceMode", "mCurrentDriveMode" }) {
++            try {
++                return m.getClass().getField(f).getByte(m) & 0xff;
++            } catch (Throwable t) {
++                // the other spelling
++            }
+         }
++        return -1;
+     }
+ 
+     static void driveMode(int m) {

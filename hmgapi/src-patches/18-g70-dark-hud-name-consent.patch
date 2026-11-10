@@ -1,0 +1,341 @@
+diff -ruN a/src/hmgapi/mods/wireless/dipo/CpTurns.java b/src/hmgapi/mods/wireless/dipo/CpTurns.java
+--- a/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-05 10:08:35.545869335 +0000
++++ b/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-05 10:08:35.624825803 +0000
+@@ -879,6 +879,8 @@
+      * the same kind of turn on these drives.
+      */
+     boolean stockStyle;
++    /** G70 2.6.2: the turn's name above a junction picture at any distance (setting g70_hud_name "always") */
++    boolean hudNameAlways;
+     /** the maneuver whose junction picture is showing, and the distance (m) it started at */
+     int jctIndex = -1, jctStart;
+     /** what the HUD list and the name above the picture last were (not resent unchanged) */
+@@ -1038,10 +1040,22 @@
+         }
+         // far: under 1 km in hundreds of metres, as the car's navigation (900, 800 ... 400 m)
+         if (unit == Cluster.UNIT_M && dist >= 100f) dist = (int) (dist / 100f) * 100f;
+-        cluster.tbtInfo(icon, 0, 1912.5f, dist, 0, 15, unit, 0, -1);
+-        stockName("");
+         int i2 = y == null || y.distance <= 0 ? 0 : stockIcon(y, iconOf(y, u.state));
+         int i3 = i2 == 0 || z == null || z.distance <= 0 ? 0 : stockIcon(z, iconOf(z, u.state));
++        // G70 2.6.2 (src-patches/18), setting g70_hud_name "always" (the owner: "the exit's name on top all the
++        // time, not only from 500 m or 1 km"): the HUD shows the name above the junction picture only, so the
++        // picture with the name goes out at any distance; the bar stays for the last stretch, as the car's navigation
++        if (hudNameAlways && j != null) {
++            cluster.tbtInfo((int) j[0], (int) j[1], j[2], dist, 0, 0, unit, 0, -1);
++            stockName(stockNameOf(x));
++            stockHud(0, 0, 0, null);
++            cluster.tbtSubInfo2C(triple(dist, unit, 0), triple(dist, unit, 1), triple(dist, unit, 2),
++                    tripleM(i2 == 0 ? -1 : y.distance, 0), tripleM(i2 == 0 ? -1 : y.distance, 1), tripleM(i2 == 0 ? -1 : y.distance, 2),
++                    tripleM(i3 == 0 ? -1 : z.distance, 0), tripleM(i3 == 0 ? -1 : z.distance, 1), tripleM(i3 == 0 ? -1 : z.distance, 2));
++            return;
++        }
++        cluster.tbtInfo(icon, 0, 1912.5f, dist, 0, 15, unit, 0, -1);
++        stockName(hudNameAlways ? stockNameOf(x) : "");
+         stockHud(icon, i2, i3, stockNameOf(x));
+         cluster.tbtSubInfo2C(triple(dist, unit, 0), triple(dist, unit, 1), triple(dist, unit, 2),
+                 tripleM(i2 == 0 ? -1 : y.distance, 0), tripleM(i2 == 0 ? -1 : y.distance, 1), tripleM(i2 == 0 ? -1 : y.distance, 2),
+diff -ruN a/src/hmgapi/mods/wireless/dipo/Dipo.java b/src/hmgapi/mods/wireless/dipo/Dipo.java
+--- a/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-05 10:08:35.545664341 +0000
++++ b/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-05 10:10:42.504447368 +0000
+@@ -102,6 +102,8 @@
+             G70Gauge.init(a.context, m.settingBoolean("g70_sport_temps", true), m.settingString("g70_sport_temps_pos", "song"));
+             G70Car.start(a.context);
+             G70Drive.start(a.context);
++            // G70 2.6.2 (src-patches/18): CarPlay always dark (the car decides CarPlay's appearance)
++            G70Dark.start(a.context, m.settingBoolean("g70_carplay_dark", true) && m.settingBoolean("bridge", true));
+         } catch (Throwable t) {
+             error("G70 extras", t);
+         }
+@@ -165,6 +167,7 @@
+         String style = mod.settingString("g70_tbt_style", "stock");
+         turns.gpmStyle = "gpm".equals(style);
+         turns.stockStyle = "stock".equals(style);   // G70 (src-patches/11): as the car's navigation, the default
++        turns.hudNameAlways = "always".equals(mod.settingString("g70_hud_name", "always"));   // G70 2.6.2 (src-patches/18)
+         if (turns.stockStyle) log("CarPlay: G70 turn style stock (as the car's navigation: junction pictures, bar, tollgate)");
+         if (turns.gpmStyle) log("CarPlay: G70 turn style gpm (side street 65535, direction, bar 32)");
+         // G70: HUD icon test (off unless the owner picks codes in the mod's settings)
+diff -ruN a/src/hmgapi/mods/wireless/dipo/G70Dark.java b/src/hmgapi/mods/wireless/dipo/G70Dark.java
+--- a/src/hmgapi/mods/wireless/dipo/G70Dark.java	1970-01-01 00:00:00.000000000 +0000
++++ b/src/hmgapi/mods/wireless/dipo/G70Dark.java	2026-11-05 10:09:55.256802086 +0000
+@@ -0,0 +1,106 @@
++package hmgapi.mods.wireless.dipo;
++
++import android.content.Context;
++
++import com.hkmc.setup.VideoSetupListener;
++import com.hkmc.setup.VideoSetupManager;
++
++/**
++ * G70 2.6.2 (src-patches/18): CarPlay always dark (setting g70_carplay_dark, on by
++ * default). The owner: "I set always dark: TMAP goes dark but CarPlay's background doesn't".
++ *
++ * The car decides CarPlay's appearance, not the iPhone: DiPO sends the night mode
++ * (CarPlayService.setNightMode) from the car's video setup (VideoSetupListener.onDimChanged:
++ * the brightness mode; on auto, the lights, getIlluminateStatus), so by day CarPlay's own
++ * screens are light whatever the iPhone's maps setting. Here the night mode is sent as on:
++ * when the wireless CarPlay session is up, a moment after each of the car's brightness or
++ * light changes (DiPO answers those first), and once a minute in case anything else turned
++ * it off. Through DiPO's own call; nothing in the car's settings changes.
++ */
++final class G70Dark {
++    private G70Dark() {}
++
++    static volatile boolean on;
++    static int sends;
++    static String lastResult;
++    static boolean wasUp;
++    static long lastAt;
++    static long EVERY_MS = 60000, AFTER_CHANGE_MS = 1500, LOOK_MS = 5000;
++
++    static void start(Context c, boolean enable) {
++        on = enable;
++        if (!on) return;
++        try {
++            new VideoSetupManager(c).addListener(new Listener());
++        } catch (Throwable t) {
++            Research.line("dark: no video setup listener: " + t);
++        }
++        G70Extra.later(new Runnable() {
++            @Override
++            public void run() {
++                while (on) {
++                    look();
++                    if (G70Extra.now) return;
++                    try {
++                        Thread.sleep(LOOK_MS);
++                    } catch (InterruptedException e) {
++                        return;
++                    }
++                }
++            }
++        }, LOOK_MS, "hmgapi-g70-dark");
++        Dipo.log("G70: CarPlay always dark (setting g70_carplay_dark)");
++    }
++
++    static boolean up() {
++        return Bridge.sCp != null && (Bridge.sCpWireless || Bridge.sCpClient);
++    }
++
++    /** every few seconds: a new session gets it at once, then once a minute */
++    static void look() {
++        boolean u = up();
++        if (u && (!wasUp || System.currentTimeMillis() - lastAt >= EVERY_MS)) send(wasUp ? "minute" : "session");
++        wasUp = u;
++    }
++
++    static final class Listener extends VideoSetupListener {
++        @Override
++        public void onDimChanged(int mode) {
++            soon("brightness mode " + mode);
++        }
++
++        @Override
++        public void onIlluminateStatusChanged(boolean lights) {
++            soon("lights " + lights);
++        }
++    }
++
++    static void soon(final String why) {
++        if (!on) return;
++        G70Extra.later(new Runnable() {
++            @Override
++            public void run() {
++                if (up()) send(why);
++            }
++        }, AFTER_CHANGE_MS, "hmgapi-g70-dark-change");
++    }
++
++    /** DiPO's CarPlayService.setNightMode(true) */
++    static synchronized void send(String why) {
++        Object cp = Bridge.sCp;
++        if (cp == null) return;
++        String r;
++        try {
++            r = String.valueOf(cp.getClass().getMethod("setNightMode", boolean.class).invoke(cp, true));
++        } catch (java.lang.reflect.InvocationTargetException x) {
++            r = "failed: " + x.getCause();
++        } catch (Throwable x) {
++            r = "failed: " + x;
++        }
++        sends++;
++        lastAt = System.currentTimeMillis();
++        if (sends == 1 || !r.equals(lastResult)) Dipo.log("G70: CarPlay night mode on (" + why + "): " + r);
++        if (!"minute".equals(why)) Research.line("dark: night mode on (" + why + "): " + r);
++        lastResult = r;
++    }
++}
+diff -ruN a/src/hmgapi/mods/wireless/dipo/G70Extra.java b/src/hmgapi/mods/wireless/dipo/G70Extra.java
+--- a/src/hmgapi/mods/wireless/dipo/G70Extra.java	2026-11-05 10:08:35.546151646 +0000
++++ b/src/hmgapi/mods/wireless/dipo/G70Extra.java	2026-11-05 10:09:41.410739298 +0000
+@@ -15,13 +15,14 @@
+  * calls go out once the wireless CarPlay channel's iAP2 session (component 5) is up, as
+  * DiPO makes them for USB. The K8 HEV package does the same ("곡 정보 구독").
+  *
+- * The startup agreement (setting g70_agree_notice, off by default): the screen the car
+- * shows at every start until the driver presses agree. 2.5.2: also the car navigation's
+- * consent (the regulation service's occupation consent, which its engine asks for). When the owner turns this on,
+- * HMG-API presses it for them through the car's own call (ModeManager.agreeUserLicense,
+- * what the agree button does), once per start. The research log records the agreement's
+- * state (ModeManager.isUserClickedAgree) and the regulation service's consent and popup
+- * states for the first minutes after a start, to tell which screen is which.
++ * The startup agreement (setting g70_agree_notice, off by default): the consent screen the
++ * car shows at every start until the driver confirms. 2.6.2: it is the system's
++ * LockScreenService screen (sys.boot.show_screen / sys.boot.confirm_screen); dismissed with
++ * the car's factory call FactoryManager.hideConsentScreen, as HMG-API's startup_notice
++ * command does, in P only, while the screen is up. The mode manager's agreeUserLicense and
++ * the regulation service's occupation consent (2.5.0-2.6.1) didn't dismiss it. The research
++ * log records those states, the two properties and the screen in front for the first
++ * minutes after a start.
+  */
+ final class G70Extra {
+     private G70Extra() {}
+@@ -140,51 +141,95 @@
+         Boolean clicked = mm == null ? null : (Boolean) callQuiet(mm, "isUserClickedAgree");
+         Object consent = reg == null ? null : callQuiet(reg, "getOccupationConsentState");
+         Object popup = reg == null ? null : callQuiet(reg, "getOccupationPopupState");
+-        String state = "user agreed " + clicked + ", occupation consent " + consent + ", occupation popup " + popup;
++        // 2.6.2: the agreement is the car's startup consent screen (the system's LockScreenService):
++        // the mode manager's isUserClickedAgree is just !sys.boot.show_screen || sys.boot.confirm_screen,
++        // which only the screen's own confirm sets. ModeManager.agreeUserLicense (2.5.0-2.6.1) never
++        // changed it (11/05 17:34: 7 presses, still not agreed until the owner's own, 14 s in).
++        String show = prop("sys.boot.show_screen"), confirm = prop("sys.boot.confirm_screen");
++        String state = "user agreed " + clicked + ", screen up " + show + ", confirmed " + confirm + ", occupation consent " + consent
++                + ", occupation popup " + popup;
+         if (!state.equals(lastState)) {
+             lastState = state;
+             Research.line("agree: " + state + " (" + second + " s after DiPO's start)");
+         }
+-        // 2.6.1: pressed at the start (11/05 14:11:36) it didn't hold: a second later the car's
+-        // mode manager still said not agreed, and only the owner's own press, 17 s in, changed
+-        // it (the agreement screen sets it back when it comes up). So: again every 2 s while
+-        // it says not agreed, up to MAX_PRESSES; and the screen in front is logged as it
+-        // changes, to name the app that shows the agreement.
+         String top = topActivity(c);
+         if (top != null && !top.equals(lastTop)) {
+             lastTop = top;
+             Research.line("agree: screen in front: " + top + " (" + second + " s)");
+         }
+-        if (agree && Boolean.FALSE.equals(clicked) && presses < MAX_PRESSES && second - lastPress >= 2) {
+-            presses++;
+-            lastPress = second;
+-            agreed = true;
+-            String r = call(mm, "agreeUserLicense");
+-            if (presses == 1) Dipo.log("G70: startup agreement pressed for the owner (setting g70_agree_notice): " + r);
+-            Research.line("agree: pressed for the owner (" + presses + ", " + second + " s): " + r);
+-            clicked = (Boolean) callQuiet(mm, "isUserClickedAgree");
+-        }
+-        // 2.5.2: the screen the owner meant is the navigation's: on 11/05 the mode manager's
+-        // agreement was already given 7 s after the start, while the regulation service's
+-        // occupation consent (what the car navigation's engine asks for) stayed 0 with its
+-        // popup state 1. The consent is set as the navigation sets it when its button is pressed.
+-        Integer one = Integer.valueOf(1);
+-        if (agree && !occupationSet && consent instanceof Integer && !one.equals(consent) && one.equals(popup)) {
+-            occupationSet = true;
+-            String r = callInt(reg, "setOccupationConsentState", 1);
+-            Dipo.log("G70: navigation consent given for the owner (setting g70_agree_notice): " + r);
+-            Research.line("agree: navigation (occupation) consent given for the owner: " + r);
+-        }
+-        // research watches the whole time; agreeing alone stops once both are done
+-        boolean modeDone = Boolean.TRUE.equals(clicked) || presses >= MAX_PRESSES;
+-        boolean occupationDone = occupationSet || one.equals(consent);
+-        return !Research.on && (!agree || (modeDone && occupationDone));
+-    }
+-
+-    static boolean occupationSet;
+-    static final int MAX_PRESSES = 30;
+-    static int presses, lastPress = -100;
++        // what dismisses it: the car's factory call HMG-API offers as "startup_notice dismiss"
++        // (FactoryManager.hideConsentScreen: the screen's confirm key and HIDE_CONSENT_SCREEN), with
++        // HMG-API's guards: the owner's switch (g70_agree_notice), the gear in P; at most 3 tries,
++        // 3 s apart, and only while the screen is up and not confirmed
++        boolean up = "true".equals(show) || "1".equals(show);
++        boolean done = "true".equals(confirm) || "1".equals(confirm);
++        if (agree && up && !done && hides < MAX_HIDES && second - lastHide >= 3) {
++            Boolean p = parked();
++            if (!Boolean.TRUE.equals(p)) {
++                if (!notParkedSaid) Research.line("agree: the gear isn't in P (" + p + "): not dismissed");
++                notParkedSaid = true;
++            } else {
++                hides++;
++                lastHide = second;
++                String r = hide(c);
++                if (hides == 1) Dipo.log("G70: startup consent screen dismissed for the owner (setting g70_agree_notice): " + r);
++                Research.line("agree: consent screen dismissed for the owner (" + hides + ", " + second + " s): " + r);
++            }
++        }
++        // research watches the whole time; dismissing alone stops once the screen's gone or confirmed
++        return !Research.on && (!agree || !up || done || hides >= MAX_HIDES);
++    }
++
++    static final int MAX_HIDES = 3;
++    static int hides, lastHide = -100;
++    static boolean notParkedSaid;
+     static String lastTop;
++    /** host tests: the gear in P, and the dismissal */
++    static java.util.concurrent.Callable<Boolean> gearP;
++    static Runnable hideHook;
++
++    static String prop(String key) {
++        try {
++            return (String) Class.forName("android.os.SystemProperties").getMethod("get", String.class).invoke(null, key);
++        } catch (Throwable x) {
++            return null;
++        }
++    }
++
++    /** the gear in P, from the car's system service (ISystemService.getGearPStatus: 1 in P), null when it can't be read */
++    static Boolean parked() {
++        try {
++            if (gearP != null) return gearP.call();
++            String name = (String) Class.forName("com.hkmc.Service").getField("SYSTEM_SERVICE").get(null);
++            Object b = Class.forName("android.os.ServiceManager").getMethod("getService", String.class).invoke(null, name);
++            if (b == null) return null;
++            Object svc = null;
++            for (java.lang.reflect.Method m : Class.forName("com.hkmc.micom.ISystemService$Stub").getMethods()) {
++                if ("asInterface".equals(m.getName())) svc = m.invoke(null, b);
++            }
++            if (svc == null) return null;
++            Object v = svc.getClass().getMethod("getGearPStatus").invoke(svc);
++            return v instanceof Number ? ((Number) v).intValue() == 1 : null;
++        } catch (Throwable x) {
++            return null;
++        }
++    }
++
++    static String hide(Context c) {
++        try {
++            if (hideHook != null) {
++                hideHook.run();
++                return "done";
++            }
++            Object fm = Class.forName("com.hkmc.factory.FactoryManager").getConstructor(Context.class).newInstance(c);
++            fm.getClass().getMethod("hideConsentScreen").invoke(fm);
++            return "done";
++        } catch (java.lang.reflect.InvocationTargetException x) {
++            return "failed: " + x.getCause();
++        } catch (Throwable x) {
++            return "failed: " + x;
++        }
++    }
+ 
+     /** the activity in front (DiPO holds GET_TASKS), null when it can't be read */
+     static String topActivity(Context c) {
+@@ -200,17 +245,6 @@
+         }
+     }
+ 
+-    static String callInt(Object o, String name, int v) {
+-        try {
+-            Object r = o.getClass().getMethod(name, int.class).invoke(o, v);
+-            return name + "(" + v + ") " + (r == null ? "done" : r);
+-        } catch (java.lang.reflect.InvocationTargetException x) {
+-            return name + " failed: " + x.getCause();
+-        } catch (Throwable x) {
+-            return name + " failed: " + x;
+-        }
+-    }
+-
+     static Object modeManager(Context c) {
+         try {
+             return Class.forName("com.hkmc.mode.ModeManager").getConstructor(Context.class).newInstance(c);
