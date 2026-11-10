@@ -81,7 +81,7 @@
 ## 준비물
 
 - **USB 메모리** . 단계마다 내용을 바꿔 담으므로 하나면 됩니다.
-- **[NEMESIS]([https://github.com/xwtk/hmg_nemesis](https://github.com/xwtk/hmg_nemesis/blob/main/ota_package.tar))** 설치 파일 `ota_package.tar`: 헤드유닛에 패키지를 설치하는 도구
+- **[NEMESIS](https://github.com/xwtk/hmg_nemesis/blob/main/ota_package.tar)** 설치 파일 `ota_package.tar`: 헤드유닛에 패키지를 설치하는 도구
 - **[HMG-API](https://github.com/Open-HMG/HMG-API/releases)** 의 `hmgapi-<버전>-nemesis.zip`: 모드 관리자 > 내려서 에셋 누르시면 다운로드 파일 있습니다. 
 - 이 저장소 [release/](release/)의 파일
 
