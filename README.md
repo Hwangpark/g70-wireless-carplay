@@ -67,12 +67,14 @@
 - **[HMG-API](https://github.com/Open-HMG/HMG-API/releases)** 의 `hmgapi-<버전>-nemesis.zip`: 모드 관리자
 - 이 저장소 [release/](release/)의 파일
 
-| 파일 | 용도 |
+| 파일 (누르면 바로 받아집니다) | 용도 |
 |---|---|
-| `wireless-carplay-g70-2.6.7.zip` | 모드 (압축을 풀지 않고 사용) |
-| `G70-wifi-mark.zip` | Wi-Fi 칩 표시. 모드 설치가 막힐 때만 사용 |
-| `G70-hookreset.zip` | 모드가 꺼졌을 때 복구 |
-| `G70-hmglog.zip` | 로그 받기 (문제 확인용) |
+| [`wireless-carplay-g70-2.6.7.zip`](https://github.com/Hwangpark/g70-wireless-carplay/raw/main/release/wireless-carplay-g70-2.6.7.zip) | 모드 (압축을 풀지 않고 사용) |
+| [`G70-wifi-mark.zip`](https://github.com/Hwangpark/g70-wireless-carplay/raw/main/release/G70-wifi-mark.zip) | Wi-Fi 칩 표시. 모드 설치가 막힐 때만 사용 |
+| [`G70-hookreset.zip`](https://github.com/Hwangpark/g70-wireless-carplay/raw/main/release/G70-hookreset.zip) | 모드가 꺼졌을 때 복구 |
+| [`G70-hmglog.zip`](https://github.com/Hwangpark/g70-wireless-carplay/raw/main/release/G70-hmglog.zip) | 로그 받기 (문제 확인용) |
+
+받은 파일이 온전한지는 [`release/SHA256SUMS.txt`](release/SHA256SUMS.txt)의 값과 비교해 확인할 수 있습니다.
 
 **확인한 조합:** NEMESIS 1.16.4 + HMG-API 1.0.0-beta.5 (실차). 지금 받을 수 있는 HMG-API 1.0.2는 PC에서 설치·복구 시험만 통과했고(28개 항목) 실차에서는 확인하지 못했습니다. 베타(1.1.0-beta)보다는 정식판(1.0.2)을 권합니다.
 
