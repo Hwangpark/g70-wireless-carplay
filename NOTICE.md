@@ -22,6 +22,26 @@ What this project changes:
 - Everything else in the built package (the recipes, `libleafiaaac.so`, the rest of the
   Java code) is the upstream mod's, unchanged.
 - The USB kits (`usb-*`) are this project's own NEMESIS scripts.
+- From 2.7.0, the optional turn style "kp" (`kpJunction`, `kpDisplay`, `kpExitBit`, `kpExitSlot`,
+  `kpStreetBit`, `kpSideBits`, `kpBar`, `kpExpressway` in `dipo/CpTurns.java`, added by
+  `hmgapi/src-patches/24-*.patch`) is adapted from **Korea Projection** by StopDragon,
+  https://github.com/StopDragon/korea-projection (AGPL-3.0); its mod source is the fork
+  https://github.com/StopDragon/HMG-API, branch `korea-build`, commit `6b72110`
+  (`near`, `nearDisplay`, `exitBit`, `exitSlot`, `streetBit`, `sideBits`, `bar`, `expressway`).
+  Changes made here are listed in the source comment above those functions.
+- From 2.7.1 (`hmgapi/src-patches/25-*.patch`), two rules follow Korea Projection's, written
+  anew for this mod's stock style: a junction picture ends only 50 m past the distance where it
+  started (Korea Projection 1.7.3, N-3, `NEAR_EXIT_MARGIN`), and the HUD name is never cut in
+  the middle of a surrogate pair (1.7.2, M-15).
+- From 2.7.2 (`hmgapi/src-patches/26-*.patch`), how Naver Map sends its turns over CarPlay
+  (its "N o'clock" turns and roundabouts as no turn with an exit angle) comes from the study in
+  **Gen5W KR** by Chunwol, https://github.com/Chunwol/gen5w-kr (`docs/navigation-app-evidence.md`,
+  GPL-3.0-only). Only that finding is used; no code was taken.
+- From 2.7.3, `hmgapi/recipes/carplay-core-read-wait-g70.recipe` makes, for the G70's own
+  `libCarPlayCore.so`, the change of `wireless-carplay-aa/recipes/carplay-core-wifi.recipe` in
+  https://github.com/Open-HMG/hmgapi-wireless-cp-aa (commit `dbb3791`, "wait 10 s for a video
+  frame, not 200 ms"), which NEMESIS's enhanced projection also makes; that recipe skips this
+  library. The recipe holds only hashes of the stock bytes and the bytes written.
 
 The source for the distributed package `release/wireless-carplay-g70-2.6.7.zip` is this
 repository together with the upstream commit named above.

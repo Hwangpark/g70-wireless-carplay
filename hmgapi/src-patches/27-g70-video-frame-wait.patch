@@ -1,0 +1,16 @@
+diff -ruN a/src/hmgapi/mods/wireless/dipo/Dipo.java b/src/hmgapi/mods/wireless/dipo/Dipo.java
+--- a/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-11 08:07:06.995903215 +0000
++++ b/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-11 08:07:15.044263918 +0000
+@@ -114,7 +114,11 @@
+             error("G70 mute", t);
+         }
+         // the CarPlay libraries, patched in memory once DiPO loads them (files stay stock)
+-        if (bridge) m.nativePatch(a, "libCarPlayCore.so");   // AirPlay sessions over Wi-Fi
++        // G70 2.7.3 (src-patches/27): the first libCarPlayCore recipe is the G70's own, the 10 s video
++        // frame wait (recipes/carplay-core-read-wait-g70.recipe; the Wi-Fi one is native on this library);
++        // setting g70_video_wait off leaves the library as the car has it
++        if (bridge && m.settingBoolean("g70_video_wait", true)) m.nativePatch(a, "libCarPlayCore.so");   // AirPlay sessions over Wi-Fi
++        else if (bridge) log("CarPlay: G70 video frame wait off (setting), libCarPlayCore as the car has it");
+         if (m.settingBoolean("audio", true)) {
+             m.nativePatch(a, "libCarPlayAudio.so");   // offer AAC and Opus on Wi-Fi
+             m.nativePatch(a, "libCarPlayUtils.so");   // its AudioConverter calls go to libleafiaaac.so

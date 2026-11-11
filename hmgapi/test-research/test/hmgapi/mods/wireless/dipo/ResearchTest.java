@@ -16,6 +16,12 @@ public final class ResearchTest {
         if (!ok) fails++;
     }
 
+    static int lines(String all, String part) {
+        int n = 0;
+        for (int i = all.indexOf(part); i >= 0; i = all.indexOf(part, i + part.length())) n++;
+        return n;
+    }
+
     static String file() throws Exception {
         return new String(Files.readAllBytes(new File(android.content.Context.cache, "g70-research.log").toPath()), StandardCharsets.UTF_8);
     }
@@ -112,6 +118,62 @@ public final class ResearchTest {
         check("other notifications: the first 200, then one in 20", n == 205, "lines: " + n);
         check("first notification of a kind to HMG-API's log", Dipo.logs.toString().contains("dipo listener: notification 77 first (a1 0, a2 0, 8 items)"), Dipo.logs.toString());
         check("mask keeps plain text", Research.mask("강남대로 123").equals("강남대로 123") && Research.mask("A1B2C3D4E5F60718").equals("<id>"), Research.mask("강남대로 123") + " " + Research.mask("A1B2C3D4E5F60718"));
+
+        // 2.7.0: route guidance asked for and the phone sends none (a map app that doesn't give iOS its turns)
+        Dipo.logs.clear();
+        Research.rgAnsweredAt = 0;   // the packets above answered on the real clock
+        Research.routeGuidance("cp>", 0x5200, 1000);
+        Research.routeGuidance("cp>", 0xfffb, 15000);
+        check("no route guidance: not said before 20 s", !Dipo.logs.toString().contains("sends no route guidance"), Dipo.logs.toString());
+        Research.routeGuidance("cp>", 0xfffb, 22000);
+        Research.routeGuidance("cp>", 0xfffb, 40000);
+        check("no route guidance 20 s after the request: said once, in HMG-API's log", lines(Dipo.logs.toString(), "sends no route guidance") == 1, Dipo.logs.toString());
+        Dipo.logs.clear();
+        Research.routeGuidance("cp>", 0x5200, 50000);
+        Research.routeGuidance("cp<", 0x5201, 50100);
+        Research.routeGuidance("cp>", 0xfffb, 90000);
+        check("the phone answered: nothing said", !Dipo.logs.toString().contains("sends no route guidance"), Dipo.logs.toString());
+
+        // 2.7.1 (src-patches/25): an unanswered request is asked once more (Stop, then Start), once per navigation
+        final int[] asked = { 0 };
+        Research.rgRetry = new Runnable() {
+            @Override
+            public void run() {
+                synchronized (asked) {
+                    asked[0]++;
+                    asked.notifyAll();
+                }
+            }
+        };
+        Dipo.logs.clear();
+        Research.rgRetried = false;
+        Research.routeGuidance("cp>", 0x5200, 100000);
+        Research.routeGuidance("cp>", 0xfffb, 121000);
+        synchronized (asked) {
+            if (asked[0] == 0) asked.wait(2000);
+        }
+        check("unanswered: asked once more, and said so", asked[0] == 1 && lines(Dipo.logs.toString(), "asking once more") == 1
+                && Dipo.logs.toString().contains("CarPlay HUD setting"), Dipo.logs.toString());
+        Research.routeGuidance("cp>", 0x5203, 121300);   // our own Stop and Start go out
+        Research.routeGuidance("cp>", 0x5200, 121500);
+        Research.routeGuidance("cp>", 0xfffb, 142000);
+        Thread.sleep(300);
+        check("still unanswered after asking again: said, not asked a third time",
+                asked[0] == 1 && lines(Dipo.logs.toString(), "asked twice") == 1 && lines(Dipo.logs.toString(), "asking once more") == 1, Dipo.logs.toString());
+        Research.rgDipoStopped();   // DiPO ends that navigation
+        Research.routeGuidance("cp>", 0x5200, 200000);
+        Research.routeGuidance("cp>", 0xfffb, 221000);
+        synchronized (asked) {
+            if (asked[0] == 1) asked.wait(2000);
+        }
+        check("the next navigation (after DiPO's stop) is asked once more again", asked[0] == 2, "asked " + asked[0]);
+        Dipo.logs.clear();
+        Research.routeGuidance("cp>", 0x5200, 300000);
+        Research.routeGuidance("cp<", 0x5201, 300400);
+        Research.routeGuidance("cp>", 0xfffb, 330000);
+        Thread.sleep(300);
+        check("answered: not asked again", asked[0] == 2 && !Dipo.logs.toString().contains("sends no route guidance"), Dipo.logs.toString());
+        Research.rgRetry = null;
 
         // off: the files go
         Research.on = false;

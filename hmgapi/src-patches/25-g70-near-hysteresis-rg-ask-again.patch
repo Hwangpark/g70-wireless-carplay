@@ -1,0 +1,150 @@
+diff -ruN a/src/hmgapi/mods/wireless/dipo/CpTurns.java b/src/hmgapi/mods/wireless/dipo/CpTurns.java
+--- a/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-11 07:16:59.454874253 +0000
++++ b/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-11 07:18:14.139561834 +0000
+@@ -890,6 +890,16 @@
+     boolean hudNameAlways;
+     /** the maneuver whose junction picture is showing */
+     int jctIndex = -1;
++    /**
++     * G70 2.7.1 (src-patches/25): a junction picture (or a tollgate's bar) starts at its distance
++     * (j[3]; 1 km for a tollgate) and, once on for this maneuver, ends only NEAR_EXIT_MARGIN past
++     * it, so a distance that wobbles around the start (GPS while stopped at a light) doesn't turn
++     * the bar on and off. The rule (in at D, out past D + 50 m) is Korea Projection's 1.7.3 (N-3,
++     * StopDragon/korea-projection, AGPL-3.0), written here for the stock style's own distances.
++     */
++    static final int NEAR_EXIT_MARGIN = 50;
++    int nearIndex = -1, nearType = -1;
++    boolean nearOn;
+     /** what the HUD list and the name above the picture last were (not resent unchanged) */
+     String stockHudKey, stockName;
+     boolean arrivedSent;
+@@ -1165,7 +1175,14 @@
+         }
+         float[] j = kpStyle ? kpJunction(x, icon) : g70Shape(x, stockJunction(x));
+         if (x.index != jctIndex) jctIndex = -1;
+-        if (j != null && meters > 0 && meters <= (int) j[3]) {
++        if (x.index != nearIndex || x.type != nearType) {
++            nearIndex = x.index;
++            nearType = x.type;
++            nearOn = false;
++        }
++        int margin = nearOn ? NEAR_EXIT_MARGIN : 0;
++        if (j != null && meters > 0 && meters <= (int) j[3] + margin) {
++            nearOn = true;
+             if (jctIndex != x.index) {
+                 jctIndex = x.index;
+                 Dipo.log("CarPlay: G70 junction picture " + (kpStyle ? "(Korea Projection style) " : "") + (int) j[0] + " (side " + (int) j[1] + ", " + j[2] + " deg) for maneuver "
+@@ -1178,7 +1195,8 @@
+             stockNear(x, shown, y, z);
+             return;
+         }
+-        if (icon == 178 && meters > 0 && meters <= 1000) {
++        if (icon == 178 && meters > 0 && meters <= 1000 + margin) {
++            nearOn = true;
+             // tollgate: the bar from 1 km (11/05: 1.1 km 90 ... 210 m 10; a ramp tollgate 500 m 50)
+             int shown = stockMeters(meters);
+             float[] sd = stockDist(shown);
+@@ -1186,6 +1204,7 @@
+             stockNear(x, shown, y, z);
+             return;
+         }
++        nearOn = false;
+         // far: under 1 km in hundreds of metres, as the car's navigation (900, 800 ... 400 m)
+         if (unit == Cluster.UNIT_M && dist >= 100f) dist = (int) (dist / 100f) * 100f;
+         int i2 = y == null || y.distance <= 0 ? 0 : stockIcon(y, iconOf(y, u.state));
+@@ -1248,6 +1267,7 @@
+             r = new byte[0];
+         }
+         int n = Math.min(r.length, 76);
++        if (n < r.length && n >= 2 && (r[n - 1] & 0xFC) == 0xD8) n -= 2;   // G70 2.7.1: not half an emoji (src-patches/25)
+         byte[] f = new byte[5 + n + 4];
+         f[0] = (byte) 0xF2;
+         f[1] = (byte) (i3 != 0 ? 3 : i2 != 0 ? 2 : 1);
+@@ -1297,6 +1317,8 @@
+         stockHudKey = null;
+         stockName = null;
+         jctIndex = -1;
++        nearIndex = -1;
++        nearOn = false;
+     }
+ 
+     /** forget every component's state and maneuvers (DiPO e/u.nT) */
+@@ -1682,6 +1704,9 @@
+             return;
+         }
+         int n = Math.min(r.length, 78);
++        // G70 2.7.1 (src-patches/25): never half of an emoji (a high surrogate kept as the last
++        // character), as Korea Projection 1.7.2 cuts the HUD name (M-15)
++        if (n < r.length && n >= 2 && (r[n - 1] & 0xFC) == 0xD8) n -= 2;
+         byte[] f = new byte[n + 5];
+         f[0] = (byte) 0xF2;
+         f[1] = (byte) (next != 0 ? 2 : 1);
+diff -ruN a/src/hmgapi/mods/wireless/dipo/Dipo.java b/src/hmgapi/mods/wireless/dipo/Dipo.java
+--- a/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-11 07:16:59.455022071 +0000
++++ b/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-11 07:17:20.761860443 +0000
+@@ -162,6 +162,13 @@
+             }
+         });
+         rg = new RgListener();
++        // G70 2.7.1 (src-patches/25): one more request when the phone leaves DiPO's unanswered
++        Research.rgRetry = new Runnable() {
++            @Override
++            public void run() {
++                restartRouteGuidance();
++            }
++        };
+         // G70: tbtInfo as DiPO sends it (default) or as Hyundai's Android Auto manager does
+         CpTurns.debug = mod.settingBoolean("g70_debug", true);
+         String style = mod.settingString("g70_tbt_style", "stock");
+@@ -197,6 +204,7 @@
+             @Override
+             protected void beforeHookedMethod(Param p) {
+                 if (OWN.get() != null) return;
++                Research.rgDipoStopped();   // G70 2.7.1 (src-patches/25)
+                 if (CpTurns.debug && dbgStops < 20) {
+                     dbgStops++;
+                     log("CarPlay dbg: DiPO stops route guidance (" + dbgStops + ")");
+diff -ruN a/src/hmgapi/mods/wireless/dipo/Research.java b/src/hmgapi/mods/wireless/dipo/Research.java
+--- a/src/hmgapi/mods/wireless/dipo/Research.java	2026-11-11 07:16:59.454919863 +0000
++++ b/src/hmgapi/mods/wireless/dipo/Research.java	2026-11-11 07:17:26.312782750 +0000
+@@ -330,6 +330,19 @@
+     static volatile long rgAskedAt, rgAnsweredAt;
+     static volatile boolean rgSaid;
+     static long RG_WAIT_MS = 20000;
++    /**
++     * G70 2.7.1 (src-patches/25): asks the phone once more (Stop, then Start, Dipo sets it) when it
++     * left the request unanswered: on 11/03 the iPhone did name Naver Map as the source
++     * when the request was already running before Naver started; on 11/10-11 DiPO asked as Naver
++     * started and got nothing. Once per navigation: again after the phone answers or DiPO stops.
++     */
++    static volatile Runnable rgRetry;
++    static volatile boolean rgRetried;
++
++    /** DiPO itself stopped route guidance (the navigation ended): the next one may be asked again */
++    static void rgDipoStopped() {
++        rgRetried = false;
++    }
+ 
+     static void routeGuidance(String dir, int id, long now) {
+         if ("cp>".equals(dir) && id == 0x5200) {
+@@ -339,10 +352,19 @@
+             rgAskedAt = 0;
+         } else if ("cp<".equals(dir) && (id == 0x5201 || id == 0x5202)) {
+             rgAnsweredAt = now;
++            rgRetried = false;
+         } else if (rgAskedAt > 0 && !rgSaid && rgAnsweredAt < rgAskedAt && now - rgAskedAt >= RG_WAIT_MS) {
+             rgSaid = true;
++            Runnable r = rgRetry;
++            boolean again = r != null && !rgRetried;
+             both("CarPlay: the phone is navigating but its map app sends no route guidance ("
+-                    + (now - rgAskedAt) / 1000 + " s after the request): nothing to show on the cluster and HUD");
++                    + (now - rgAskedAt) / 1000 + " s after the request" + (rgRetried ? ", asked twice" : "")
++                    + "): nothing to show on the cluster and HUD (Naver Map: its CarPlay HUD setting)"
++                    + (again ? "; asking once more" : ""));
++            if (again) {
++                rgRetried = true;
++                new Thread(r, "hmgapi-cp-rg-ask-again").start();
++            }
+         }
+     }
+ 

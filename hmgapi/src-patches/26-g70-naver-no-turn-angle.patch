@@ -1,0 +1,45 @@
+diff -ruN a/src/hmgapi/mods/wireless/dipo/CpTurns.java b/src/hmgapi/mods/wireless/dipo/CpTurns.java
+--- a/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-11 07:55:21.799203109 +0000
++++ b/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-11 07:56:01.352547474 +0000
+@@ -2076,6 +2076,41 @@
+                     }
+                 }
+             }
++            g70NoTurnAngle();
+         }
++
++        /**
++         * G70 2.7.2 (src-patches/26): Naver Map sends its "N o'clock" turns as no turn (0) at an
++         * intersection with an exit angle (8 o'clock -120, 9 -90, 11 -45, 1 +45, 3 +90, 4 +120), and
++         * every roundabout as no turn at a roundabout with the exit angle (Gen5W KR's study of Naver
++         * Map 6.12.1 for iPhone, Chunwol/gen5w-kr docs/navigation-app-evidence.md). DiPO's table has
++         * nothing for type 0, so these went out as straight on: read here as the turn the angle
++         * says (slight up to 67, normal up to 112, sharp, U-turn from 170) or as a roundabout (6,
++         * its icon by the exit angle as for other apps). TMAP sends no angles: unchanged.
++         */
++        void g70NoTurnAngle() {
++            if (type != 0 || (exit == 0 && junction != 1)) return;
++            if (exit > 180 && exit <= 360) exit -= 360;
++            int was = type;
++            if (junction == 1) type = 6;
++            else type = g70TurnType(exit);
++            if (type != was && debug && dbgNoTurnAngle < 20) {
++                dbgNoTurnAngle++;
++                Dipo.log("CarPlay: G70 maneuver " + index + " came as no turn with an exit angle of " + exit
++                        + " deg (junction " + junction + "), read as type " + type);
++            }
++        }
++    }
++
++    static int dbgNoTurnAngle;
++
++    /** G70 2.7.2: the maneuver type for a turn at an intersection by its exit angle (-180..180; 0 stays straight on) */
++    static int g70TurnType(int a) {
++        int b = Math.abs(a);
++        if (b <= 22) return 0;
++        if (b <= 67) return a > 0 ? 50 : 49;
++        if (b <= 112) return a > 0 ? 2 : 1;
++        if (b < 170) return a > 0 ? 48 : 47;
++        return 4;
+     }
+ }

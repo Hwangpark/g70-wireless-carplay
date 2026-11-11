@@ -42,6 +42,13 @@ public final class G70StockTest {
         return m;
     }
 
+    /** a Naver Map maneuver (Gen5W KR's study of Naver Map 6.12.1): the type, the junction (0 or 1) and the exit angle only */
+    static Iap2NotiMsg manN(int index, int type, String after, int distance, int exit, int junction) {
+        Iap2NotiMsg m = man(index, type, "d", after, distance, 2);
+        m.getItemGroup().add(9, ENUM, new int[] { junction }).add(11, 1, new int[] { exit });
+        return m;
+    }
+
     /** a RouteGuidanceUpdate: state, current maneuver, metres to it (item 10, 11, 12 as TMAP) */
     static Iap2NotiMsg rg(int state, int current, int meters) {
         String s = meters >= 1000 ? String.valueOf(Math.round(meters / 100.0) / 10.0) : String.valueOf(meters);
@@ -204,6 +211,101 @@ public final class G70StockTest {
         ns.maneuver(man(7, 3, "1.3km", "Dul-ro", 1331, 0));
         ns.routeGuidance(rg(1, 7, 1300));
         check("name always, straight (no picture): the icon, and the name too", has("tbt 65 0 1912.5 1.3 0 15 1 0 -1") && has("road [Dul-ro]"));
+
+        // 2.7.0: setting kp: the junction picture and the bar as Korea Projection computes them, in the stock flow
+        CpTurns k = new CpTurns(new android.content.Context(), c, null);
+        k.stockStyle = true;
+        k.kpStyle = true;
+        c.calls.clear();
+        k.maneuver(man(0, 2, "a road", "Road A", 800, 2));
+        k.maneuver(man(1, 1, "200m", "Road B", 200, 2));
+        k.maneuver(man(2, 3, "Gate TG / toll", "Gate TG", 3000, 0));
+        k.routeGuidance(rg(1, 0, 800));
+        check("kp: far from the turn, the icon as in the stock style", has("tbt 67 0 1912.5 800.0 0 15 0 0 -1"));
+        c.calls.clear();
+        k.routeGuidance(rg(1, 0, 300));
+        check("kp: right turn inside 350 m: 13 with only the road taken (bit 4), 90 deg, bar 80 (300 of 350)",
+                has("tbt 13 16 90.0 300.0 0 0 0 80 0") && has("road [Road A]"));
+        c.calls.clear();
+        k.routeGuidance(rg(1, 1, 200));
+        check("kp: left turn at 200 m: bit 12, 270 deg, bar 50", has("tbt 13 4096 270.0 200.0 0 0 0 50 0"));
+        c.calls.clear();
+        k.routeGuidance(rg(1, 2, 400));
+        check("kp: a tollgate keeps the car's own 178 and bar", has("tbt 178 0 1912.5 400.0 0 15 0 30 0"));
+        check("kp: bar in tenths of D, 10 to 90", CpTurns.kpBar(349, 350) == 90 && CpTurns.kpBar(315, 350) == 90 && CpTurns.kpBar(314, 350) == 80
+                && CpTurns.kpBar(34, 350) == 10 && CpTurns.kpBar(1049, 1050) == 90 && CpTurns.kpBar(900, 1050) == 80);
+        check("kp: side street bits: straight 0, right 4, left 12, behind none", CpTurns.kpStreetBit(0) == 0 && CpTurns.kpStreetBit(90) == 4
+                && CpTurns.kpStreetBit(270) == 12 && CpTurns.kpStreetBit(180) == -1);
+        int[] ex = CpTurns.kpDisplay(23, 0, 0, 0, 164), ut = CpTurns.kpDisplay(4, 0, 0, 0, 72), no = CpTurns.kpDisplay(10, 0, 0, 0, 3);
+        check("kp: highway exit right 17 at 90 deg, U-turn 31 at 270 deg, no picture for the destination",
+                ex[0] == 17 && ex[2] * 7.5f == 90f && ut[0] == 31 && ut[2] * 7.5f == 270f && no == null);
+        CpTurns kn = new CpTurns(new android.content.Context(), c, null);
+        kn.stockStyle = true;
+        kn.kpStyle = true;
+        kn.hudNameAlways = true;
+        c.calls.clear();
+        kn.maneuver(man(0, 2, "a road", "Road A", 2400, 0));
+        kn.routeGuidance(rg(1, 0, 2400));
+        check("kp with the name always: its picture in km, no bar, the name above", has("tbt 13 16 90.0 2.4 0 0 1 0 -1") && has("road [Road A]"));
+
+        // 2.7.1 (src-patches/25): near-turn hysteresis as Korea Projection 1.7.3 (N-3): the picture
+        // starts at its distance (300 m for a city right turn) and ends only 50 m past it
+        CpTurns hy = new CpTurns(new android.content.Context(), c, null);
+        hy.stockStyle = true;
+        hy.maneuver(man(0, 2, "a road", "Road A", 400, 2));
+        c.calls.clear();
+        hy.routeGuidance(rg(1, 0, 320));
+        check("hysteresis: 320 m before the picture started: far (icon)", starts("tbt 67 ") && !starts("tbt 13 "));
+        c.calls.clear();
+        hy.routeGuidance(rg(1, 0, 290));
+        check("hysteresis: 290 m: the picture with its bar", starts("tbt 13 2065 90.0 290.0 ") && !starts("tbt 67 "));
+        c.calls.clear();
+        hy.routeGuidance(rg(1, 0, 330));
+        check("hysteresis: back to 330 m (GPS at a light): the picture stays, bar 90", starts("tbt 13 2065 90.0 ") && has("tbt 13 2065 90.0 300.0 0 0 0 90 0") && !starts("tbt 67 "));
+        c.calls.clear();
+        hy.routeGuidance(rg(1, 0, 360));
+        check("hysteresis: 360 m, more than 50 m past: far again", starts("tbt 67 ") && !starts("tbt 13 "));
+        c.calls.clear();
+        hy.routeGuidance(rg(1, 0, 330));
+        check("hysteresis: 330 m after leaving: stays far until 300 m", starts("tbt 67 ") && !starts("tbt 13 "));
+        // 2.7.1: the HUD name is never cut in the middle of an emoji (Korea Projection 1.7.2, M-15)
+        StringBuilder longName = new StringBuilder();
+        for (int i = 0; i < 37; i++) longName.append('\uAC00');
+        longName.append("\uD83D\uDE00\uB05D");
+        c.calls.clear();
+        hy.stockHud(67, 0, 0, longName.toString());
+        String hud = c.calls.isEmpty() ? "" : c.calls.get(c.calls.size() - 1);
+        check("HUD name: 37 Hangul then an emoji at the 76-byte cut: the emoji left out whole", hud.startsWith("hud f2014300") && hud.contains("00ac") && !hud.contains("3dd8"));
+
+        // 2.7.2 (src-patches/26): Naver Map's "N o'clock" turns and roundabouts come as no turn (0) with an exit angle
+        CpTurns nv = new CpTurns(new android.content.Context(), c, null);
+        nv.stockStyle = true;
+        nv.maneuver(manN(0, 0, "Road A", 800, 90, 0));     // 3 o'clock
+        nv.maneuver(manN(1, 0, "Road B", 250, -120, 0));   // 8 o'clock
+        nv.maneuver(manN(2, 0, "Road C", 800, 270, 1));    // roundabout, its exit at 270 (left)
+        nv.maneuver(manN(3, 0, "Road D", 800, 0, 0));      // no turn, no angle
+        nv.maneuver(manN(4, 0, "Road E", 800, -45, 0));    // 11 o'clock
+        c.calls.clear();
+        nv.routeGuidance(rg(1, 0, 800));
+        check("Naver 3 o'clock (type 0 at 90 deg), far: the right turn icon 67, not straight 65", has("tbt 67 0 1912.5 800.0 0 15 0 0 -1"));
+        c.calls.clear();
+        nv.routeGuidance(rg(1, 0, 290));
+        check("Naver 3 o'clock near: the right turn picture", starts("tbt 13 2065 90.0 290.0 "));
+        c.calls.clear();
+        nv.routeGuidance(rg(1, 1, 250));
+        check("Naver 8 o'clock (-120 deg) near: the sharp left picture", starts("tbt 13 1041 247.5 250.0 "));
+        c.calls.clear();
+        nv.routeGuidance(rg(1, 2, 800));
+        check("Naver roundabout exit at 270: the left icon 70", starts("tbt 70 "));
+        c.calls.clear();
+        nv.routeGuidance(rg(1, 3, 800));
+        check("no turn without an angle: straight 65 as before", starts("tbt 65 "));
+        c.calls.clear();
+        nv.routeGuidance(rg(1, 4, 800));
+        check("Naver 11 o'clock (-45 deg): the slight left icon 71", starts("tbt 71 "));
+        check("turn type by angle: 0 straight, 45 slight, 90 normal, 120 sharp, 180 U-turn",
+                CpTurns.g70TurnType(10) == 0 && CpTurns.g70TurnType(45) == 50 && CpTurns.g70TurnType(-45) == 49 && CpTurns.g70TurnType(90) == 2
+                && CpTurns.g70TurnType(-90) == 1 && CpTurns.g70TurnType(120) == 48 && CpTurns.g70TurnType(-120) == 47 && CpTurns.g70TurnType(180) == 4);
 
         // the other styles are unchanged
         CpTurns d = new CpTurns(new android.content.Context(), c, null);

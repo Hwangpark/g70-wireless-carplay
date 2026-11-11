@@ -1,0 +1,206 @@
+diff -ruN a/src/hmgapi/mods/wireless/dipo/CpTurns.java b/src/hmgapi/mods/wireless/dipo/CpTurns.java
+--- a/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-11 02:22:17.587710736 +0000
++++ b/src/hmgapi/mods/wireless/dipo/CpTurns.java	2026-11-11 02:24:20.181195006 +0000
+@@ -879,6 +879,13 @@
+      * the same kind of turn on these drives.
+      */
+     boolean stockStyle;
++    /**
++     * G70 2.7.0 (src-patches/24), setting g70_tbt_style = "kp": the junction picture and the
++     * distance bar as Korea Projection computes them (kpJunction, kpBar below), inside the
++     * stock style's flow (names, HUD list, distances, tollgate, arrival stay as above). For
++     * the owner to compare on the car; the default stays the stock style.
++     */
++    boolean kpStyle;
+     /** G70 2.6.2: the turn's name above a junction picture at any distance (setting g70_hud_name "always") */
+     boolean hudNameAlways;
+     /** the maneuver whose junction picture is showing */
+@@ -1023,6 +1030,108 @@
+         return shown >= 1000 ? new float[] { shown / 100 / 10f, Cluster.UNIT_KM } : new float[] { shown, Cluster.UNIT_M };
+     }
+ 
++    // ---- Korea Projection's near-turn picture (setting g70_tbt_style = "kp") ----
++    // kpJunction, kpDisplay, kpExitBit, kpExitSlot, kpStreetBit, kpSideBits, kpBar and kpExpressway
++    // are adapted from Korea Projection (https://github.com/StopDragon/korea-projection, AGPL-3.0;
++    // its mod source: StopDragon/HMG-API, branch korea-build, commit 6b72110, dipo/CpTurns.java:
++    // near, nearDisplay, exitBit, exitSlot, streetBit, sideBits, bar, expressway), 2026-11-11.
++    // Changed here: fitted to this file's Maneuver and stock-style flow; no picture for a tollgate
++    // (it keeps the car's own 178 with its bar); the roundabout branch takes this file's icon.
++
++    /** where Korea Projection starts the near-turn picture (m): 350 in general, 1050 for highway exits */
++    static final int KP_D_GENERAL = 350, KP_D_EXPRESSWAY = 1050;
++
++    /** {picture type, side street bits, direction (degrees), starts within (m)} as Korea Projection sends them; null: icon only */
++    static float[] kpJunction(Maneuver x, int icon) {
++        if (x == null || tollgate(x)) return null;
++        int[] disp = kpDisplay(x.type, x.side, x.junction, x.exit, icon);
++        if (disp == null) return null;
++        int bits = disp[1] < 0 ? 0 : kpSideBits(x.g70Arms, disp[1]);
++        return new float[] { disp[0], bits, disp[2] * 7.5f, kpExpressway(x.type) ? KP_D_EXPRESSWAY : KP_D_GENERAL };
++    }
++
++    /** the bar: 10 x floor(left x 10 / D), 10 to 90 */
++    static int kpBar(int remain, int d) {
++        int b = (int) ((long) remain * 10L / d);
++        if (b < 1) b = 1;
++        if (b > 9) b = 9;
++        return b * 10;
++    }
++
++    static boolean kpExpressway(int type) {
++        return type == 8 || type == 22 || type == 23 || type == 51 || type == 52 || type == 53;
++    }
++
++    /**
++     * {picture type, the exit's side street bit (-1: none), direction slot (7.5 degrees)}; null: no picture.
++     * Highway exit 17 (right) / 18 (left), U-turn 31, fork 25, a roundabout its exit icon, any other turn 13.
++     */
++    static int[] kpDisplay(int type, int side, int junction, int exit, int icon) {
++        switch (type) {
++            case 22: case 52: return new int[] { 18, -1, 36 };
++            case 23: case 53: return new int[] { 17, -1, 12 };
++            case 8: case 51: {
++                boolean left = exit < 0 || (exit == 0 && side == 1);
++                return left ? new int[] { 18, -1, 36 } : new int[] { 17, -1, 12 };
++            }
++            case 4: case 26: return new int[] { 31, -1, side == 1 ? 12 : 36 };
++            case 13: return new int[] { 25, -1, exit != 0 ? kpExitSlot(exit) : 42 };
++            case 14: return new int[] { 25, -1, exit != 0 ? kpExitSlot(exit) : 6 };
++            default: break;
++        }
++        if (junction == 1 || type == 6 || type == 7 || type == 19 || (type >= 28 && type <= 46)) {
++            if (icon <= 0) return null;
++            return new int[] { icon, kpExitBit(exit), kpExitSlot(exit) };
++        }
++        int dir;
++        switch (type) {
++            case 1: case 20: dir = 36; break;
++            case 2: case 21: dir = 12; break;
++            case 47: dir = 30; break;
++            case 48: dir = 18; break;
++            case 49: dir = 42; break;
++            case 50: dir = 6; break;
++            case 3: case 5: case 9: dir = 0; break;
++            default: return null;
++        }
++        return exit != 0 ? new int[] { 13, kpExitBit(exit), kpExitSlot(exit) } : new int[] { 13, dir / 3, dir };
++    }
++
++    static int kpExitBit(int exit) {
++        int b = kpStreetBit(exit);
++        if (b >= 0) return b;
++        int cw = ((exit % 360) + 360) % 360;
++        return cw <= 179 ? 7 : 8;
++    }
++
++    static int kpExitSlot(int exit) {
++        int b = kpStreetBit(exit);
++        if (b >= 0) return 3 * b;
++        int cw = ((exit % 360) + 360) % 360;
++        return cw <= 179 ? 21 : 27;
++    }
++
++    /** one angle's side street bit: straight on 0, then one bit per 22.5 degrees clockwise (1 to 15); the road behind -1 */
++    static int kpStreetBit(int angle) {
++        int cw = ((angle % 360) + 360) % 360;
++        if (cw >= 348 || cw <= 12) return 0;
++        if (cw > 168 && cw < 192) return -1;
++        int n = (int) ((cw - 12) / 22.5) + 1;
++        return n > 15 ? 15 : n;
++    }
++
++    static int kpSideBits(int[] angles, int exitBit) {
++        int bits = 0;
++        if (angles != null) {
++            for (int a : angles) {
++                int b = kpStreetBit(a);
++                if (b >= 0) bits |= 1 << b;
++            }
++        }
++        if (exitBit >= 0 && exitBit <= 15) bits |= 1 << exitBit;
++        return bits & 0xFFFF;
++    }
++
+     static String stockNameOf(Maneuver x) {
+         if (x == null) return "";
+         if (x.afterRoad != null && x.afterRoad.length() > 0) return x.afterRoad;
+@@ -1054,17 +1163,18 @@
+             icon = y.type == 23 ? 164 : 82;
+             x = asExit(x, y.type);
+         }
+-        float[] j = g70Shape(x, stockJunction(x));
++        float[] j = kpStyle ? kpJunction(x, icon) : g70Shape(x, stockJunction(x));
+         if (x.index != jctIndex) jctIndex = -1;
+         if (j != null && meters > 0 && meters <= (int) j[3]) {
+             if (jctIndex != x.index) {
+                 jctIndex = x.index;
+-                Dipo.log("CarPlay: G70 junction picture " + (int) j[0] + " (side " + (int) j[1] + ", " + j[2] + " deg) for maneuver "
++                Dipo.log("CarPlay: G70 junction picture " + (kpStyle ? "(Korea Projection style) " : "") + (int) j[0] + " (side " + (int) j[1] + ", " + j[2] + " deg) for maneuver "
+                         + x.index + " (type " + x.type + ") at " + meters + " m");
+             }
+             int shown = stockMeters(meters);
+             float[] sd = stockDist(shown);
+-            cluster.tbtInfo((int) j[0], (int) j[1], j[2], sd[0], 0, 0, (int) sd[1], stockBar(meters, (int) j[3]), 0);
++            cluster.tbtInfo((int) j[0], (int) j[1], j[2], sd[0], 0, 0, (int) sd[1],
++                    kpStyle ? kpBar(meters, (int) j[3]) : stockBar(meters, (int) j[3]), 0);
+             stockNear(x, shown, y, z);
+             return;
+         }
+diff -ruN a/src/hmgapi/mods/wireless/dipo/Dipo.java b/src/hmgapi/mods/wireless/dipo/Dipo.java
+--- a/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-11 02:22:17.588774005 +0000
++++ b/src/hmgapi/mods/wireless/dipo/Dipo.java	2026-11-11 02:24:20.184637364 +0000
+@@ -166,9 +166,11 @@
+         CpTurns.debug = mod.settingBoolean("g70_debug", true);
+         String style = mod.settingString("g70_tbt_style", "stock");
+         turns.gpmStyle = "gpm".equals(style);
+-        turns.stockStyle = "stock".equals(style);   // G70 (src-patches/11): as the car's navigation, the default
++        turns.kpStyle = "kp".equals(style);         // G70 2.7.0 (src-patches/24): Korea Projection's picture and bar, to compare
++        turns.stockStyle = "stock".equals(style) || turns.kpStyle;   // G70 (src-patches/11): as the car's navigation, the default
+         turns.hudNameAlways = "always".equals(mod.settingString("g70_hud_name", "always"));   // G70 2.6.2 (src-patches/18)
+-        if (turns.stockStyle) log("CarPlay: G70 turn style stock (as the car's navigation: junction pictures, bar, tollgate)");
++        if (turns.kpStyle) log("CarPlay: G70 turn style kp (Korea Projection's junction picture and bar, in the stock flow)");
++        else if (turns.stockStyle) log("CarPlay: G70 turn style stock (as the car's navigation: junction pictures, bar, tollgate)");
+         if (turns.gpmStyle) log("CarPlay: G70 turn style gpm (side street 65535, direction, bar 32)");
+         // G70: HUD icon test (off unless the owner picks codes in the mod's settings)
+         turns.testCodes = CpTurns.testCodes(mod.settingString("g70_icon_test", "off"));
+diff -ruN a/src/hmgapi/mods/wireless/dipo/Research.java b/src/hmgapi/mods/wireless/dipo/Research.java
+--- a/src/hmgapi/mods/wireless/dipo/Research.java	2026-11-11 02:22:17.587860876 +0000
++++ b/src/hmgapi/mods/wireless/dipo/Research.java	2026-11-11 02:24:42.285609516 +0000
+@@ -321,7 +321,37 @@
+         }
+     }
+ 
++    /**
++     * G70 2.7.0: when the head unit asked for route guidance (cp> 0x5200) and when the phone last
++     * answered (cp< 0x5201). A map app that doesn't give iOS its turns leaves the HUD empty: the
++     * iPhone sent nothing at all for two whole Naver Map drives (11/10, 11/11) and one state 0
++     * when they ended. Said once per request, 20 s after it, in HMG-API's log too.
++     */
++    static volatile long rgAskedAt, rgAnsweredAt;
++    static volatile boolean rgSaid;
++    static long RG_WAIT_MS = 20000;
++
++    static void routeGuidance(String dir, int id, long now) {
++        if ("cp>".equals(dir) && id == 0x5200) {
++            rgAskedAt = now;
++            rgSaid = false;
++        } else if ("cp>".equals(dir) && id == 0x5203) {
++            rgAskedAt = 0;
++        } else if ("cp<".equals(dir) && (id == 0x5201 || id == 0x5202)) {
++            rgAnsweredAt = now;
++        } else if (rgAskedAt > 0 && !rgSaid && rgAnsweredAt < rgAskedAt && now - rgAskedAt >= RG_WAIT_MS) {
++            rgSaid = true;
++            both("CarPlay: the phone is navigating but its map app sends no route guidance ("
++                    + (now - rgAskedAt) / 1000 + " s after the request): nothing to show on the cluster and HUD");
++        }
++    }
++
+     private static void message(String dir, int id, int mlen, byte[] b, int p, int avail) {
++        try {
++            routeGuidance(dir, id, System.nanoTime() / 1000000L);
++        } catch (Throwable t) {
++            // a note only
++        }
+         String key = dir + " " + hex4(id);
+         int n = count(key);
+         String name = NAMES.get(id);

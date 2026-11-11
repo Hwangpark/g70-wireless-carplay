@@ -1,8 +1,8 @@
 # 제네시스 G70 무선 CarPlay (HMG-API 모드)
 
-국내 **제네시스 G70**(Gen5W 내비게이션, 펌웨어 `IKFL.KOR.0000.V039.001.260902`)에서 아이폰 **무선 CarPlay**와 **HUD·계기판 길안내(TMAP)** 를 쓰기 위한 [HMG-API](https://github.com/Open-HMG/HMG-API) 모드입니다. HMG-API의 공식 모드 "Wireless CarPlay + Android Auto"를 G70에 맞게 바꾼 것입니다.
+국내 **제네시스 G70**(Gen5W 내비게이션, 펌웨어 `IKFL.KOR.0000.V039.001.260902`)에서 아이폰 **무선 CarPlay**와 **HUD·계기판 길안내(TMAP·네이버 지도)** 를 쓰기 위한 [HMG-API](https://github.com/Open-HMG/HMG-API) 모드입니다. HMG-API의 공식 모드 "Wireless CarPlay + Android Auto"를 G70에 맞게 바꾼 것입니다.
 
-현재 버전: **2.6.7** ([release/](release/))
+현재 버전: **2.7.3** ([release/](release/))
 
 > ⚠️ **비공식 자료입니다.** 이 자료로 생긴 고장, 공식 업데이트 실패, 보증·수리 문제는 설치한 사람의 책임입니다. 2021년 8월식 G70 차 한 대에서만 확인했습니다. 내용을 이해하고 직접 판단해서 사용하세요.
 
@@ -14,7 +14,7 @@
 | 펌웨어 | `IKFL.KOR.0000.V039.001.260902` ([설치 전 확인](#설치-전-확인)) |
 | Wi-Fi 모듈 | 있어야 함 ([설치 전 확인](#설치-전-확인)) |
 | 폰 | 아이폰 (무선 CarPlay) / 안드로이드 오토 확인 X  |
-| 지도 | 티맵만 확인 다른 어플들은 확인 X  |
+| 지도 | 티맵·네이버 지도 확인 (둘 다 앱에서 카플레이 HUD 설정을 켜야 함, [아래](#지도-앱-설정)) / 다른 어플들은 확인 X  |
 
 다른 차종이나 다른 펌웨어에는 설치 단계에서 막힙니다. 억지로 넣지 마세요.
 
@@ -26,7 +26,9 @@
 |---|---|
 | 아이폰 무선 CarPlay (블루투스로 붙고 Wi-Fi로 넘어감) | ✅ 실차 확인 |
 | HUD·계기판 길안내 (TMAP): 순정 내비처럼 교차로 그림 + 이름 + 거리 막대 | ✅ 실차 확인 |
+| HUD·계기판 길안내 (네이버 지도): 교차로 그림 + 이름 + 거리 막대 | ✅ 실차 확인 (2.7.3) |
 | HUD에 회전 이름을 거리와 상관없이 항상 표시 (설정) | ✅ 실차 확인 |
+| CarPlay 화면만 멈추고 소리는 나던 문제: Wi-Fi가 잠깐 늦어도 화면 유지 (설정, 기본 켬) | ✅ 실차 적용 확인 (2.7.3, 주행 2번 멈춤 없음) |
 | 음소거하면 CarPlay 음악 일시정지, 풀면 다시 재생 | ✅ 실차 확인 |
 | 시동 때 뜨는 동의 화면 자동 닫기 (설정, 기본 꺼짐, P단에서만) | ✅ 실차 확인 |
 | 무선에서도 HUD에 곡 정보 표시 | ✅ 실차 확인 |
@@ -38,8 +40,18 @@
 알아 둘 점:
 
 - **'HUD 이름 항상'(기본값)이면 계기판에도 다음 안내가 계속 뜨고, 목적지·남은 거리·도착 시간 화면은 가려집니다.** 계기판과 HUD가 같은 신호를 받아서 따로 보낼 수 없습니다. 도착 정보가 필요하면 설정을 `Near only`로 바꾸세요(아래 설정 표).
+- 네이버 지도는 도착할 때 안내를 바로 끝내서, HUD에 도착 화면 없이 안내가 사라집니다.
 - 무선 CarPlay는 곡을 넘길 때 유선보다 반응이 느립니다. 무선 방식 자체의 특성입니다.
 - 모드는 헤드유닛 안에서만 동작합니다. 주행·안전 장치를 제어하지 않고, 차 밖으로 데이터를 보내지 않습니다.
+
+## 지도 앱 설정
+
+아이폰 지도 앱이 차로 안내 정보를 보내도록 앱에서 켜 줘야 합니다. 꺼져 있으면 CarPlay 화면에는 안내가 나와도 HUD·계기판에는 아무것도 뜨지 않습니다.
+
+| 앱 | 켜는 곳 |
+|---|---|
+| TMAP | 전체 → 연구소 → **카플레이 HUD 연동** |
+| 네이버 지도 | 메뉴 → 설정(톱니바퀴) → 내비게이션 탭 → 카플레이 **HUD** 스위치 |
 
 ## 사진
 
@@ -87,7 +99,7 @@
 
 | 파일 (누르면 바로 받아집니다) | 용도 |
 |---|---|
-| [`wireless-carplay-g70-2.6.7.zip`](https://github.com/Hwangpark/g70-wireless-carplay/raw/main/release/wireless-carplay-g70-2.6.7.zip) | 모드 (압축을 풀지 않고 사용) |
+| [`wireless-carplay-g70-2.7.3.zip`](https://github.com/Hwangpark/g70-wireless-carplay/raw/main/release/wireless-carplay-g70-2.7.3.zip) | 모드 (압축을 풀지 않고 사용) |
 | [`G70-wifi-mark.zip`](https://github.com/Hwangpark/g70-wireless-carplay/raw/main/release/G70-wifi-mark.zip) | Wi-Fi 칩 표시. 모드 설치가 막힐 때만 사용 |
 | [`G70-hookreset.zip`](https://github.com/Hwangpark/g70-wireless-carplay/raw/main/release/G70-hookreset.zip) | 모드가 꺼졌을 때 복구 |
 | [`G70-hmglog.zip`](https://github.com/Hwangpark/g70-wireless-carplay/raw/main/release/G70-hmglog.zip) | 로그 받기 (문제 확인용) |
@@ -134,7 +146,7 @@ HMG-API가 이 차의 앱 구조를 읽어 표(훅 맵)를 만드는 단계입�
 ### 4단계: 모드 설치
 
 1. USB를 비우고 `HMGAPI` 폴더, 그 안에 `updates` 폴더를 만듭니다.
-2. `wireless-carplay-g70-2.6.7.zip`을 **압축을 풀지 않고** `HMGAPI/updates/`에 넣습니다.
+2. `wireless-carplay-g70-2.7.3.zip`을 **압축을 풀지 않고** `HMGAPI/updates/`에 넣습니다.
 3. USB를 꽂고 HMG-API 앱 → **Check USB updates**를 누릅니다.
 4. 목록의 모드를 눌러 설치합니다. **"등록되지 않은 작성자" 경고는 정상**입니다(공식 목록에 없는 개인 제작이라는 뜻).
 5. 메인 화면으로 돌아가 **Apply changes** → **Restart unit**.
@@ -161,7 +173,7 @@ G70은 부팅 10초쯤에 Wi-Fi 칩을 꺼서 HMG-API가 칩을 못 보는 경�
 
 ### 6단계: 확인과 마무리
 
-- TMAP으로 목적지를 찍고 안내를 시작해 HUD에 교차로 그림과 이름이 나오는지 봅니다.
+- TMAP이나 네이버 지도로 목적지를 찍고 안내를 시작해 HUD에 교차로 그림과 이름이 나오는지 봅니다. 안 나오면 위 [지도 앱 설정](#지도-앱-설정)을 확인하세요.
 - 음악 재생 중 음소거를 눌러 일시정지되는지 봅니다.
 - 아래 '설정'에서 **`G70: research log`를 끄는 것을 권합니다**(개인정보 항목 참고).
 - 시동 때 동의 화면을 자동으로 닫고 싶으면 `G70: press the startup agreement for me`를 켭니다.
@@ -176,12 +188,13 @@ HMG-API 앱 → Mods → 이 모드의 설정에서 바꿉니다. 바꾼 뒤에�
 
 | 설정 (앱에 보이는 이름) | 기본 | 설명 |
 |---|---|---|
-| G70: how turns go to the cluster/HUD | Stock | Stock: 순정 내비 방식(교차로 그림·거리 막대). DiPO: 화살표 아이콘만. GPM: 안드로이드 오토 방식 |
+| G70: how turns go to the cluster/HUD | Stock | Stock: 순정 내비 방식(교차로 그림·거리 막대). Korea Projection picture and bar (test): Korea Projection 방식의 그림·막대(비교용). DiPO: 화살표 아이콘만. GPM: 안드로이드 오토 방식 |
 | G70: the turn's name on the HUD | Always | Always: 거리와 상관없이 그림과 이름 표시(계기판도 다음 안내 화면). Near only: 순정처럼 멀리서는 아이콘, 회전 300m(고속도로 출구 1km) 전부터 그림과 이름. 계기판은 평소 도착 정보를 보여줄 것으로 예상(실차 미확인) |
 | G70: song info on wireless CarPlay | 켬 | 무선에서도 HUD에 곡 정보 |
 | G70: call state on wireless CarPlay (test) | 끔 | **켜지 마세요.** 켜면 통화와 안내 음성이 안 들렸습니다(비교 시험용) |
 | G70: mute pauses CarPlay music | 켬 | 음소거 → 일시정지, 해제 → 재생 |
 | G70: CarPlay always dark | 끔 | 차가 주간으로 판단할 때 CarPlay를 야간 화면으로 바꿈. 켜지 않아도 차의 화면 밝기 모드를 '야간'으로 두면 CarPlay가 항상 다크입니다 |
+| G70: CarPlay picture waits through Wi-Fi stalls | 켬 | Wi-Fi가 잠깐 늦어도 CarPlay 화면이 멈추지 않게 합니다(메모리에서만 바꾸고 파일은 순정 그대로). 끄면 차의 원래 동작 |
 | G70: press the startup agreement for me | 끔 | 시동 때 동의 화면을 대신 닫음(P단에서만). 매번 직접 동의할 내용에 동의하는 분만 켜세요 |
 | G70: HUD icon / lane test | Off | 개발용 테스트. 건드리지 마세요 |
 | G70: research log | **켬** | 개발용 기록. 아래 '개인정보' 참고 |
@@ -198,6 +211,8 @@ HMG-API 앱 → Mods → 이 모드의 설정에서 바꿉니다. 바꾼 뒤에�
 | 위쪽이 "Hooks off" 또는 "no hook map" | 설치 3번(훅 맵)을 다시 |
 | 재시작을 연달아 한 뒤 모드가 전부 안 됨 | 부팅 보호가 걸린 것. `G70-hookreset.zip`을 풀어 USB 최상위에 넣고 실행 → 2분 이상 켜 둔 뒤 재시작 |
 | 통화·내비 음성이 안 들림 | `G70: call state on wireless CarPlay (test)`가 꺼져 있는지 확인 |
+| CarPlay에는 안내가 나오는데 HUD·계기판엔 안 뜸 | 지도 앱의 카플레이 HUD 설정([지도 앱 설정](#지도-앱-설정)) |
+| CarPlay 화면만 멈추고 소리는 나옴 | 모드가 2.7.3 이상인지, `G70: CarPlay picture waits through Wi-Fi stalls`가 켜져 있는지 |
 
 ## 제거
 
@@ -229,6 +244,7 @@ sh hmgapi/test-g70-extra.sh <HMG-API checkout>
 | `release/` | 설치 파일과 USB 키트, `SHA256SUMS.txt` |
 | `hmgapi/make-g70-mod.py`, `build-g70-mod.sh` | 공식 모드 → G70 변형 생성, 빌드·서명 |
 | `hmgapi/src-patches/` | 공식 모드 Java 코드에 대한 G70 패치 (순서대로 적용) |
+| `hmgapi/recipes/` | G70 라이브러리용 메모리 레시피 (순정 바이트의 해시와 바꾸는 바이트만) |
 | `hmgapi/test-*`, `hmgapi/stubs/` | 호스트 테스트와 컴파일용 껍데기 |
 | `hmgapi/maps/genesis/g70/kor/260902/` | PC에서 만든 G70 훅 맵 (클래스·메서드 이름만) |
 | `usb-wifi-mark/`, `usb-hookreset/`, `usb-hmglog/` | USB 키트의 소스 |
@@ -243,11 +259,14 @@ sh hmgapi/test-g70-extra.sh <HMG-API checkout>
 - **[NEMESIS](https://github.com/xwtk/hmg_nemesis)** (xwtk, AGPL-3.0): 헤드유닛에 패키지를 설치할 수 있게 한 도구.
 - **[HMG Leafia Plus](https://github.com/VysseCodes/HMG-Leafia-Plus)** (보관됨): HMG-API의 전신.
 - **[REA](https://github.com/morluto/rea)**: 분석 기록 방식(관찰 / 도출 / 추론 구분).
+- **[Korea Projection](https://github.com/StopDragon/korea-projection)** (StopDragon, AGPL-3.0): 비교용 길안내 방식(`kp`)과 곧 회전 경계 규칙.
+- **[Gen5W KR](https://github.com/Chunwol/gen5w-kr)** (Chunwol): 네이버 지도가 CarPlay로 보내는 값의 분석(분석 결과만 참고, 코드는 가져오지 않음).
+- **[hmgapi-wireless-cp-aa](https://github.com/Open-HMG/hmgapi-wireless-cp-aa)** (Open-HMG, AGPL-3.0): CarPlay 영상 프레임 대기 수정.
 
 이 저장소는 **AGPL-3.0**으로 배포합니다([LICENSE](LICENSE)). 바꾼 내용과 고지는 [NOTICE.md](NOTICE.md)에 있습니다. 다시 배포하거나 고쳐서 배포할 때는 같은 라이선스와 출처 표시를 유지하고 소스를 함께 공개해야 합니다.
 
-Genesis, Hyundai, Apple, CarPlay, iPhone, TMAP은 각 소유자의 상표입니다.
+Genesis, Hyundai, Apple, CarPlay, iPhone, TMAP, 네이버 지도는 각 소유자의 상표입니다.
 
 ---
 
-**English (short):** An HMG-API mod that ports the official "Wireless CarPlay + Android Auto" mod to the Korean Genesis G70 (Gen5W, `IKFL.KOR`, firmware 260902): wireless CarPlay, cluster/HUD turn-by-turn for TMAP in the car navigation's own style, mute-to-pause, and startup consent dismissal. Verified on one car with NEMESIS 1.16.4 and HMG-API 1.0.0-beta.5. Unofficial, not affiliated with Hyundai, Genesis or Apple; no warranty; uninstalling restores the stock files. AGPL-3.0, see NOTICE.md.
+**English (short):** An HMG-API mod that ports the official "Wireless CarPlay + Android Auto" mod to the Korean Genesis G70 (Gen5W, `IKFL.KOR`, firmware 260902): wireless CarPlay, cluster/HUD turn-by-turn for TMAP and Naver Map in the car navigation's own style (turn on each app's CarPlay HUD setting), a fix for the CarPlay picture freezing on short Wi-Fi stalls, mute-to-pause, and startup consent dismissal. Verified on one car with NEMESIS 1.16.4 and HMG-API 1.0.0-beta.5. Unofficial, not affiliated with Hyundai, Genesis or Apple; no warranty; uninstalling restores the stock files. AGPL-3.0, see NOTICE.md.
